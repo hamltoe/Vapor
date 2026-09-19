@@ -1,0 +1,14 @@
+# Reverse proxy for vapord. Point a DNS name (DuckDNS, Cloudflare, or your
+# own) at the server's static IP, then:
+#
+#   sudo apt install caddy
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   sudo systemctl enable --now caddy
+#
+# Caddy obtains a Let's Encrypt certificate automatically. vapord stays on
+# localhost:8777 and never sees TLS itself.
+
+vapor.example.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:8777
+}

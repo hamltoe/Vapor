@@ -53,3 +53,19 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Build trees
+build/
+build-*/
+out/
+.cache/
+
+# Vendored sources, fetched by scripts/vendor-deps.ps1 or .sh
+third_party/
+
+# Local runtime state: server db + content root, client library + config
+run/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

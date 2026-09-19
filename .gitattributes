@@ -1,0 +1,20 @@
+# Shell scripts and unit files break under bash/systemd if they get CRLF.
+*.sh            text eol=lf
+*.service       text eol=lf
+Caddyfile       text eol=lf
+
+# Windows-only scripts want CRLF.
+*.ps1           text eol=crlf
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+
+# Our own sources: normalize in the repo, native in the working tree.
+*.c             text
+*.h             text
+*.md            text
+*.json          text
+CMakeLists.txt  text
+*.cmake         text
+
+# Vendored upstream sources: leave byte-for-byte alone.
+third_party/**  -text linguist-vendored

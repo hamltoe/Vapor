@@ -1,0 +1,195 @@
+# Operations
+
+How to put vapord on a Linux host and point clients at it. For the
+from-source walkthrough (bootstrap, build, first game), use the
+[root README](../README.md).
+
+## Prerequisites
+
+**Linux (WSL or a real box)**
+
+```
+sudo bash scripts/bootstrap-linux.sh
+```
+
+That installs a compiler, CMake, libcurl, libsodium, SDL2, and OpenGL
+headers. Then vendor the single-file libraries:
+
+```
+bash scripts/vendor-deps.sh
+bash scripts/build-linux.sh
+```
+
+Binaries land in `build-linux/bin/`: `vapord`, `vapor-admin`, `vapor`,
+`vapor-gui`, `vapor-selftest`.
+
+**Windows**
+
+Visual Studio Build Tools plus CMake. From PowerShell:
+
+```
+powershell -File scripts/vendor-deps.ps1
+powershell -File scripts/build-windows.ps1
+```
+
+The Windows build produces the client only (`vapor`, `vapor-gui`).
+vapord needs libsodium and is not built there. SDL2 is fetched into
+`third_party/sdl2` by the vendor script.
+
+Pass `-NoGui` to `build-windows.ps1` if you only want the CLI.
+
+## First local run
+
+On Linux, in two terminals:
+
+```
+# server
+./build-linux/bin/vapord -H 127.0.0.1 -p 8777 \
+    -r ./run/content -d ./run/vapor.db
+
+# ingest a folder that already has a launchable binary
+./build-linux/bin/vapor-admin -r ./run/content -d ./run/vapor.db add ./mygame \
+    --id my-game --name "My Game" --version 1.0.0 \
+    --linux-exec game --cover ./art/cover.png
+
+# client
+./build-linux/bin/vapor config server http://127.0.0.1:8777
+./build-linux/bin/vapor register
+./build-linux/bin/vapor list
+./build-linux/bin/vapor install my-game
+./build-linux/bin/vapor launch my-game
+```
+
+`VAPOR_PASSWORD` supplies the password without a prompt, which the smoke
+tests use. `VAPOR_DATA_DIR` keeps client state out of your real profile.
+
+`scripts/smoke-test.sh` (Linux) and `scripts/smoke-test-windows.ps1`
+(Windows client against a Linux server) walk the same loop automatically.
+
+The GUI is the same loop with a window:
+
+```
+./build-linux/bin/vapor-gui
+# or, to start an install without clicking:
+./build-linux/bin/vapor-gui --install my-game
+```
+
+## Deploying vapord
+
+Recommended layout on the Linux host:
+
+| Path | What |
+| --- | --- |
+| `/usr/local/bin/vapord` | Server binary |
+| `/usr/local/bin/vapor-admin` | Ingest tool |
+| `/etc/vapor/vapord.conf` | Copied from `deploy/vapord.conf` |
+| `/var/lib/vapor/vapor.db` | Catalog and accounts |
+| `/srv/vapor/content` | Archives and cover art |
+
+Create a dedicated user, then install the unit:
+
+```
+sudo useradd --system --home /var/lib/vapor --shell /usr/sbin/nologin vapor
+sudo mkdir -p /etc/vapor /var/lib/vapor /srv/vapor/content
+sudo cp deploy/vapord.conf /etc/vapor/vapord.conf
+sudo cp deploy/vapord.service /etc/systemd/system/
+sudo chown -R vapor:vapor /var/lib/vapor /srv/vapor/content
+sudo systemctl daemon-reload
+sudo systemctl enable --now vapord
+```
+
+The example unit binds vapord to localhost. Do not expose port 8777 on
+the public interface; put TLS in front of it.
+
+`vapor-admin` must run as a user that can write the content root and the
+database. Either `sudo -u vapor` or add your account to the `vapor` group
+with write access on those two paths.
+
+## TLS: Caddy (recommended)
+
+vapord speaks plain HTTP. Caddy on 443 terminates TLS with Let's Encrypt
+and forwards to `127.0.0.1:8777`.
+
+1. Point a hostname at your static IP (DuckDNS, Cloudflare, or your own
+   DNS).
+2. Edit `deploy/Caddyfile` and replace `vapor.example.com`.
+3. Install and start Caddy:
+
+```
+sudo apt install caddy
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl enable --now caddy
+```
+
+Clients then use HTTPS:
+
+```
+vapor config server https://vapor.example.com
+```
+
+No pin is required: the system CA store already trusts Let's Encrypt.
+
+## TLS: self-signed pin (no DNS)
+
+If you would rather not involve a public name, generate a long-lived
+certificate, keep vapord (or a tiny TLS proxy) on HTTPS, and pin the
+public key in the Linux client.
+
+libcurl wants the pin in SPKI form:
+
+```
+sha256//BASE64_OF_THE_SUBJECT_PUBLIC_KEY_INFO
+```
+
+Set it with:
+
+```
+vapor config pin 'sha256//…'
+vapor config pin none          # back to normal CA checks
+```
+
+The pin is stored in `config.ini` as `pinned_pubkey` and passed to
+`CURLOPT_PINNEDPUBLICKEY`. The Windows WinHTTP backend refuses to
+connect when a pin is set rather than silently falling back to CA
+checks. Use Caddy plus a public certificate for Windows clients.
+
+## Cover art
+
+Pass `--cover FILE` to `vapor-admin add`. PNG or JPEG, 4 MiB or smaller.
+The library grid fetches `/games/{id}/versions/{version}/cover` into
+`covers/` under the client data directory and decodes it on the UI
+thread. A game without art still shows a text card.
+
+## Updates
+
+`vapor list` prints `[update available]` when the server's latest
+version is newer than the installed one. In the GUI the middle button
+becomes **Update** and runs a forced install of that version.
+
+There is no background updater. Refresh the catalog (or reopen the GUI)
+to see new versions after you ingest them.
+
+## Closing registration
+
+Once the household accounts exist:
+
+```
+# in vapord.conf
+enable_registration = false
+```
+
+or start vapord with `--closed`. Existing sessions keep working.
+`GET /health` reports `registration_open: false` so the GUI can say so
+before anyone types a password.
+
+## What this prototype does not do
+
+- Per-user entitlements (every signed-in user sees every game).
+- Wine / Proton launches (`targets[].runtime` is reserved for that).
+- Cloud saves, friends, or a storefront.
+- Windows-hosted vapord.
+- Automatic client self-update.
+
+Those can be added without changing the API prefix or the manifest
+schema, which is the point of leaving `runtime`, `package.format`, and
+`/api/v1` as extension points.

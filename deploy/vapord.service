@@ -1,0 +1,22 @@
+[Unit]
+Description=Vapor game content server
+After=network.target
+Documentation=file:///opt/vapor/Docs/operations.md
+
+[Service]
+Type=simple
+User=vapor
+Group=vapor
+ExecStart=/usr/local/bin/vapord -c /etc/vapor/vapord.conf
+Restart=on-failure
+RestartSec=2
+# vapord speaks plain HTTP; TLS belongs on the reverse proxy in front of it.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vapor /srv/vapor/content
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
