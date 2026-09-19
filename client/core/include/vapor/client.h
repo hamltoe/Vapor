@@ -39,6 +39,10 @@ void vapor_client_close(vapor_client *vc);
 int  vapor_client_save_config(vapor_client *vc);
 void vapor_client_set_error(vapor_client *vc, const char *fmt, ...);
 int  vapor_client_has_token(const vapor_client *vc);
+/* Validates and applies `url` in memory. Does not persist; call
+ * vapor_client_save_config after. A change of host clears the stored token
+ * so a leftover session cannot be sent to the wrong server. */
+int  vapor_client_set_server_url(vapor_client *vc, const char *url);
 
 /* --------------------------------------------------------------------- net */
 typedef struct {
@@ -85,11 +89,14 @@ typedef struct {
 } vapor_server_info;
 
 int vapor_server_ping(vapor_client *vc, vapor_server_info *out);
+/* GET /health and require a vapord JSON body. Register and login call this
+ * first so an account cannot be created or signed in against a dead URL. */
+int vapor_require_server(vapor_client *vc, vapor_server_info *out);
 
 int vapor_auth_register(vapor_client *vc, const char *username,
                         const char *password, vapor_account *out);
 /* On success the token is stored in the config file, so a later run of any
- * frontend is already signed in. */
+ * frontend is already signed in. The server must be reachable. */
 int vapor_auth_login(vapor_client *vc, const char *username,
                      const char *password);
 int vapor_auth_logout(vapor_client *vc);

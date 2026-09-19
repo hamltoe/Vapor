@@ -95,8 +95,8 @@ Override with `VAPOR_DATA_DIR` for tests or portable installs.
 Inside that directory:
 
 ```
-config.ini          server URL, token, library path, optional TLS pin
-library.db          installed games and playtime
+config.ini          server URL, session token, library path, optional TLS pin
+library.db          installed games and playtime (not accounts)
 covers/<id>-<ver>.cover
 ```
 
@@ -114,6 +114,10 @@ db_path      = /var/lib/vapor/vapor.db
 
 Content layout is `<content_root>/<game_id>/<version>/`. Every path segment
 is validated; a hostile id or version cannot walk out of the root.
+
+Accounts live only in the server SQLite `users` table (username, Argon2id
+hash, admin flag, created_at). The client never creates a local user; it
+stores a session token after a successful login against vapord.
 
 ## Threading
 

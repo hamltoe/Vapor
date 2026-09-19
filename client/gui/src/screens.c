@@ -102,7 +102,7 @@ void
 vapor_gui_login_screen(struct nk_context *ctx, vapor_app *app, int w, int h)
 {
     const float panel_w = 430.0f;
-    const float panel_h = 438.0f;
+    const float panel_h = 470.0f;
     struct nk_rect area;
     int            busy = vapor_gui_job_busy(app);
 
@@ -115,6 +115,10 @@ vapor_gui_login_screen(struct nk_context *ctx, vapor_app *app, int w, int h)
         nk_layout_row_dynamic(ctx, 18, 1);
         nk_label_colored(ctx, "your self-hosted game library", NK_TEXT_CENTERED,
                          COL_MUTED_V);
+        nk_layout_row_dynamic(ctx, 18, 1);
+        nk_label_colored(ctx,
+                         "a live server is required to sign in or create an account",
+                         NK_TEXT_CENTERED, COL_MUTED_V);
 
         nk_layout_row_dynamic(ctx, 8, 1);
         nk_spacing(ctx, 1);

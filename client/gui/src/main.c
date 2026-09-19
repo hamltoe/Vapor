@@ -132,26 +132,32 @@ main(int argc, char **argv)
 
     vapor_gui_job_init(&app);
 
-    /* A saved token means the last session is still good, so skip the login
-     * screen exactly as the CLI would. */
-    if (vapor_client_has_token(&vc)) {
+    /* A stored token is not a session until vapord confirms it. The library
+     * screen is only shown after a live /me, so a dead server cannot skip the
+     * login form. */
+    if (vapor_client_has_token(&vc)
+        && vapor_auth_whoami(&vc, &app.account) == 0) {
         app.screen = SCREEN_LIBRARY;
-        snprintf(app.account.username, sizeof(app.account.username), "%s",
-                 vc.cfg.username);
         vapor_gui_start_refresh(&app);
     } else {
         vapor_server_info info;
+
         app.screen = SCREEN_LOGIN;
-        /* A quick unauthenticated probe, so the login screen can say whether
-         * the server is even reachable before credentials are typed. */
-        if (vapor_server_ping(&vc, &info) == 0) {
+        if (vapor_client_has_token(&vc)) {
+            vapor_gui_notice(&app, 1, "could not restore the session: %s",
+                             vc.err[0] ? vc.err : "server unreachable");
+        }
+        if (vapor_require_server(&vc, &info) == 0) {
             snprintf(app.server_info, sizeof(app.server_info),
-                     "%s %s is reachable%s", info.service[0] ? info.service : "server",
-                     info.version,
-                     info.has_users ? "" : "; the first account becomes admin");
+                     "%s %s is reachable%s",
+                     info.service[0] ? info.service : "server", info.version,
+                     !info.registration_open ? "; registration is closed"
+                     : info.has_users        ? ""
+                                             : "; the first account becomes admin");
         } else {
             snprintf(app.server_info, sizeof(app.server_info),
-                     "cannot reach the server yet");
+                     "cannot reach the server; sign-in and account creation "
+                     "need a live connection");
         }
     }
 

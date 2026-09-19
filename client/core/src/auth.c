@@ -32,16 +32,11 @@ credentials_json(const char *username, const char *password)
 static int
 check_credentials(vapor_client *vc, const char *username, const char *password)
 {
-    size_t n;
-
-    if (!username || !*username) {
-        vapor_client_set_error(vc, "a username is required");
-        return -1;
-    }
-    n = strlen(username);
-    if (n > VAPOR_USERNAME_MAX) {
-        vapor_client_set_error(vc, "a username may be at most %d characters",
-                               VAPOR_USERNAME_MAX);
+    if (!vapor_username_is_valid(username)) {
+        vapor_client_set_error(vc,
+                               "username must be %d-%d characters of letters, "
+                               "digits, dot, dash or underscore",
+                               VAPOR_USERNAME_MIN, VAPOR_USERNAME_MAX);
         return -1;
     }
     if (!password || strlen(password) < VAPOR_PASSWORD_MIN) {
@@ -87,16 +82,55 @@ vapor_server_ping(vapor_client *vc, vapor_server_info *out)
 }
 
 int
+vapor_require_server(vapor_client *vc, vapor_server_info *out)
+{
+    vapor_server_info  info;
+    vapor_server_info *dst = out ? out : &info;
+
+    memset(dst, 0, sizeof(*dst));
+    if (!vc->cfg.server_url[0]) {
+        vapor_client_set_error(vc, "no server configured; set a server URL first");
+        return -1;
+    }
+    if (vapor_server_ping(vc, dst) != 0) {
+        if (!vc->err[0]) {
+            vapor_client_set_error(vc, "cannot reach the server at %s",
+                                   vc->cfg.server_url);
+        }
+        return -1;
+    }
+    /* Ping treats any 2xx as success. Register and login need a real vapord,
+     * not an empty 200 from whatever is bound to that port. */
+    if (strcmp(dst->service, "vapord") != 0) {
+        vapor_client_set_error(vc,
+                               "no Vapor server at %s; check the URL and that "
+                               "vapord is running",
+                               vc->cfg.server_url);
+        return -1;
+    }
+    return 0;
+}
+
+int
 vapor_auth_register(vapor_client *vc, const char *username,
                     const char *password, vapor_account *out)
 {
-    vapor_response r;
-    cJSON         *body;
-    char          *payload;
-    int            rc;
+    vapor_response    r;
+    vapor_server_info info;
+    cJSON            *body;
+    char             *payload;
+    const char       *stored_name;
+    int               rc;
 
     if (out) {
         memset(out, 0, sizeof(*out));
+    }
+    if (vapor_require_server(vc, &info) != 0) {
+        return -1;
+    }
+    if (!info.registration_open) {
+        vapor_client_set_error(vc, "registration is closed on this server");
+        return -1;
     }
     if (check_credentials(vc, username, password) != 0) {
         return -1;
@@ -116,13 +150,16 @@ vapor_auth_register(vapor_client *vc, const char *username,
 
     body = vapor_json_parse_response(&r);
     vapor_response_free(&r);
+    stored_name = body ? vapor_json_str(body, "username", NULL) : NULL;
+    if (!stored_name || !*stored_name) {
+        vapor_client_set_error(vc, "the server did not confirm the new account");
+        cJSON_Delete(body);
+        return -1;
+    }
     if (out) {
-        snprintf(out->username, sizeof(out->username), "%s", username);
-        if (body) {
-            vapor_json_copy(out->username, sizeof(out->username), body,
-                            "username", username);
-            out->is_admin = vapor_json_bool(body, "is_admin", 0);
-        }
+        vapor_json_copy(out->username, sizeof(out->username), body, "username",
+                        stored_name);
+        out->is_admin = vapor_json_bool(body, "is_admin", 0);
     }
     cJSON_Delete(body);
     return 0;
@@ -137,6 +174,9 @@ vapor_auth_login(vapor_client *vc, const char *username, const char *password)
     const char    *token;
     int            rc;
 
+    if (vapor_require_server(vc, NULL) != 0) {
+        return -1;
+    }
     if (check_credentials(vc, username, password) != 0) {
         return -1;
     }

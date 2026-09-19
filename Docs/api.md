@@ -61,19 +61,33 @@ Unauthenticated liveness probe.
 { "username": "ada", "password": "a long enough secret" }
 ```
 
-Returns the new account. Does not start a session; call `login` next.
+Returns the stored account. Does not start a session; call `login` next.
 Fails with `disabled` when `enable_registration` is off, and `conflict`
-if the username is taken.
+if the username is taken. The client refuses to send this request until
+`GET /health` proves a vapord is reachable.
+
+```json
+{
+  "username": "ada",
+  "user_id": 1,
+  "is_admin": true,
+  "created_at": 1760000000
+}
+```
+
+`user_id` and `created_at` come from the SQLite `users` row that was just
+written. The first account on an empty database is admin.
 
 ### `POST /api/v1/auth/login`
 
-Same body. Returns:
+Same body. The client also requires a live vapord before posting. Returns:
 
 ```json
 {
   "token": "64 hex characters",
   "expires_at": 1770000000,
   "username": "ada",
+  "user_id": 1,
   "is_admin": false
 }
 ```
@@ -88,7 +102,7 @@ copy. A 401 is treated as already signed out.
 ### `GET /api/v1/me`
 
 ```json
-{ "username": "ada", "is_admin": false, "created_at": 1760000000 }
+{ "user_id": 1, "username": "ada", "is_admin": false, "created_at": 1760000000 }
 ```
 
 ### `GET /api/v1/games`

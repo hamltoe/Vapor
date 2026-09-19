@@ -123,6 +123,12 @@ try {
     Check 'config library' 'library'       @('config', 'library', $library)
     Check 'ping'           'is up'         @('ping')
 
+    Step 'accounts require a live server'
+    $null = Vapor @('config', 'server', 'http://127.0.0.1:1')
+    CheckFails 'register against a dead URL' @('register', 'winuser')
+    CheckFails 'login against a dead URL'    @('login', 'winuser')
+    Check 'restore server' 'server is now' @('config', 'server', "http://127.0.0.1:$Port")
+
     Step 'accounts'
     Check 'register'  'created account' @('register', 'winuser')
     Check 'login'     'signed in as'    @('login', 'winuser')

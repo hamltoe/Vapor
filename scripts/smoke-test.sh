@@ -86,6 +86,12 @@ check "config server"   "server is now"  -- vapor config server "http://127.0.0.
 check "config library"  "library"        -- vapor config library "${work}/games"
 check "ping"            "is up"          -- vapor ping
 
+step "accounts require a live server"
+vapor config server "http://127.0.0.1:1" >/dev/null
+check_fails "register against a dead URL" vapor register smokeuser
+check_fails "login against a dead URL"    vapor login smokeuser
+check "restore server"  "server is now"  -- vapor config server "http://127.0.0.1:${port}"
+
 step "accounts"
 export VAPOR_PASSWORD="smoke-test-password"
 check "register first user"  "created account"  -- vapor register smokeuser

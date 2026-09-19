@@ -35,6 +35,45 @@ vapor_client_has_token(const vapor_client *vc)
     return 1;
 }
 
+int
+vapor_client_set_server_url(vapor_client *vc, const char *url)
+{
+    char   buf[sizeof(vc->cfg.server_url)];
+    size_t n;
+
+    if (!url || !*url) {
+        vapor_client_set_error(vc, "a server URL is required");
+        return -1;
+    }
+    if (!vapor_str_has_prefix(url, "http://")
+        && !vapor_str_has_prefix(url, "https://")) {
+        vapor_client_set_error(vc, "server URL must start with http:// or https://");
+        return -1;
+    }
+    if ((size_t)snprintf(buf, sizeof(buf), "%s", url) >= sizeof(buf)) {
+        vapor_client_set_error(vc, "server URL is too long");
+        return -1;
+    }
+    n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == '/' || buf[n - 1] == '\\')) {
+        buf[--n] = '\0';
+    }
+    if (n == 0) {
+        vapor_client_set_error(vc, "a server URL is required");
+        return -1;
+    }
+
+    if (strcmp(vc->cfg.server_url, buf) != 0) {
+        /* The old token belongs to the old server. */
+        if (vc->cfg.token[0]) {
+            vapor_secure_zero(vc->cfg.token, sizeof(vc->cfg.token));
+            vc->cfg.token_expires_at = 0;
+        }
+        snprintf(vc->cfg.server_url, sizeof(vc->cfg.server_url), "%s", buf);
+    }
+    return 0;
+}
+
 static char *
 trim(char *s)
 {

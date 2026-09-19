@@ -151,6 +151,7 @@ job_main(void *ud)
     case JOB_REGISTER: {
         int rc;
 
+        set_status(app, "connecting to the server...");
         if (kind == JOB_REGISTER) {
             vapor_account acct;
             set_status(app, "creating the account...");
@@ -342,6 +343,17 @@ vapor_gui_start_login(vapor_app *app, int registering)
     /* Nuklear leaves the buffers unterminated at the tracked length. */
     app->username[app->username_len] = '\0';
     app->password[app->password_len] = '\0';
+    app->server_url[app->server_url_len] = '\0';
+
+    if (vapor_client_set_server_url(app->vc, app->server_url) != 0) {
+        vapor_gui_notice(app, 1, "%s", app->vc->err);
+        return -1;
+    }
+    snprintf(app->server_url, sizeof(app->server_url), "%s",
+             app->vc->cfg.server_url);
+    app->server_url_len = (int)strlen(app->server_url);
+    (void)vapor_client_save_config(app->vc);
+
     return start(app, registering ? JOB_REGISTER : JOB_LOGIN, NULL, NULL);
 }
 

@@ -11,29 +11,6 @@
 #include "vapor/util.h"
 
 static int
-username_is_valid(const char *u)
-{
-    size_t i, n;
-
-    if (!u) {
-        return 0;
-    }
-    n = strlen(u);
-    if (n < VAPOR_USERNAME_MIN || n > VAPOR_USERNAME_MAX) {
-        return 0;
-    }
-    for (i = 0; i < n; i++) {
-        char ch = u[i];
-        int  ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
-               || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.';
-        if (!ok) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static int
 handle_register(vapord *app, struct mg_connection *c)
 {
     cJSON      *body;
@@ -41,7 +18,7 @@ handle_register(vapord *app, struct mg_connection *c)
     char        username[VAPOR_USERNAME_MAX + 1];
     char        password[VAPOR_PASSWORD_MAX + 1];
     char        pwhash[512];
-    int64_t     user_id = 0, existing = 0;
+    int64_t     user_id = 0, existing = 0, created_at = 0;
     int         is_first_user, rc, status, got_user, got_pass;
 
     cJSON      *out;
@@ -64,7 +41,7 @@ handle_register(vapord *app, struct mg_connection *c)
                                        sizeof(password));
     cJSON_Delete(body);
 
-    if (got_user != 0 || !username_is_valid(username)) {
+    if (got_user != 0 || !vapor_username_is_valid(username)) {
         return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST,
                                   "username must be %d-%d chars of letters, "
                                   "digits, dot, dash or underscore",
@@ -77,14 +54,6 @@ handle_register(vapord *app, struct mg_connection *c)
                                   VAPOR_PASSWORD_MIN, VAPOR_PASSWORD_MAX);
     }
 
-    /* The very first account becomes the admin, which avoids a chicken-and-egg
-     * bootstrap step on a fresh server. */
-    if (vapord_user_count(app->db, &existing) != 0) {
-        sodium_memzero(password, sizeof(password));
-        return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL, "database error");
-    }
-    is_first_user = (existing == 0);
-
     rc = vapord_password_hash(password, pwhash, sizeof(pwhash));
     sodium_memzero(password, sizeof(password));
     if (rc != 0) {
@@ -92,14 +61,45 @@ handle_register(vapord *app, struct mg_connection *c)
                                   "could not hash password");
     }
 
+    /* Hash first, then take a write lock: Argon2 is slow and must not sit
+     * inside BEGIN IMMEDIATE. The lock serialises the first-admin check so two
+     * concurrent registers on an empty database cannot both become admin. */
+    if (sqlite3_exec(app->db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+        sodium_memzero(pwhash, sizeof(pwhash));
+        return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL, "database error");
+    }
+
+    if (vapord_user_count(app->db, &existing) != 0) {
+        sqlite3_exec(app->db, "ROLLBACK", NULL, NULL, NULL);
+        sodium_memzero(pwhash, sizeof(pwhash));
+        return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL, "database error");
+    }
+    is_first_user = (existing == 0);
+
     rc = vapord_user_create(app->db, username, pwhash, is_first_user, &user_id);
     sodium_memzero(pwhash, sizeof(pwhash));
 
     if (rc == 1) {
+        sqlite3_exec(app->db, "ROLLBACK", NULL, NULL, NULL);
         return vapord_send_errorf(c, 409, VAPOR_ERR_CONFLICT,
                                   "username is already taken");
     }
     if (rc != 0) {
+        sqlite3_exec(app->db, "ROLLBACK", NULL, NULL, NULL);
+        return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL, "database error");
+    }
+
+    /* Read the row back before COMMIT so a 201 always means the account is
+     * actually in the users table. */
+    if (vapord_user_name(app->db, user_id, username, sizeof(username),
+                         &is_first_user, &created_at)
+        != 0) {
+        sqlite3_exec(app->db, "ROLLBACK", NULL, NULL, NULL);
+        return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL,
+                                  "account was not stored");
+    }
+    if (sqlite3_exec(app->db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_exec(app->db, "ROLLBACK", NULL, NULL, NULL);
         return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL, "database error");
     }
 
@@ -110,6 +110,7 @@ handle_register(vapord *app, struct mg_connection *c)
     cJSON_AddStringToObject(out, "username", username);
     cJSON_AddNumberToObject(out, "user_id", (double)user_id);
     cJSON_AddBoolToObject(out, "is_admin", is_first_user);
+    cJSON_AddNumberToObject(out, "created_at", (double)created_at);
     status = vapord_send_json(c, 201, out);
     return status;
 }

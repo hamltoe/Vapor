@@ -87,8 +87,17 @@ Pass `-NoGui` if you only want the CLI. Re-run `vendor-deps.ps1` if the
 GUI is skipped because `third_party\sdl2` is missing.
 
 A Windows machine can still host the **server** by building it inside
-WSL with the Linux steps above. Keep the content root on a Windows path
-if you want Explorer to see the archives (`/mnt/d/Games/vapor-content`).
+WSL with the Linux steps above. After Ubuntu is installed:
+
+```
+powershell -File scripts/start-wsl-server.ps1
+```
+
+That binds vapord to `0.0.0.0:8777` and keeps the database under
+`~/vapor` on the Linux filesystem (SQLite on `/mnt/c` is unreliable).
+The Windows client then uses `http://127.0.0.1:8777`. Keep the content
+root on a Windows path if you want Explorer to see the archives
+(`/mnt/d/Games/vapor-content`).
 
 ## Run the server
 
@@ -212,11 +221,14 @@ cd build-windows\bin
 If `ping` fails from Windows to WSL: bind vapord to `0.0.0.0`, allow
 port 8777 in the Windows firewall, and use the WSL address from
 `wsl hostname -I` (not `localhost`, unless you have port forwarding).
+`scripts/start-wsl-server.ps1` already binds `0.0.0.0` and WSL2 forwards
+localhost, so `http://127.0.0.1:8777` is the usual URL.
 
 ### GUI
 
-Same settings and token as the CLI; if you already signed in, the window
-skips the login screen.
+Same settings as the CLI. A stored token is restored only after vapord
+confirms it with `GET /me`; if the server is unreachable the login screen
+stays up.
 
 ```
 # Linux

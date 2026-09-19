@@ -10,6 +10,11 @@
 #define VAPOR_ID_MAX 64
 int vapor_id_is_valid(const char *id);
 
+/* Account names are not path segments, but they are unique keys. 3-32 chars of
+ * letters, digits, dot, dash or underscore. Shared by vapord and libvapor so
+ * the client rejects locally what the server would reject. */
+int vapor_username_is_valid(const char *username);
+
 /* Version strings are also path segments. Slightly looser than ids (uppercase
  * and '+' are allowed) but still traversal-proof. */
 #define VAPOR_VERSION_MAX 64

@@ -165,11 +165,24 @@ cmd_ping(vapor_client *vc)
 static int
 cmd_register(vapor_client *vc, const char *arg_user)
 {
-    char          username[VAPOR_USERNAME_MAX + 1];
-    char          password[VAPOR_PASSWORD_MAX + 1];
-    char          confirm[VAPOR_PASSWORD_MAX + 1];
-    vapor_account acct;
-    int           rc;
+    char              username[VAPOR_USERNAME_MAX + 1];
+    char              password[VAPOR_PASSWORD_MAX + 1];
+    char              confirm[VAPOR_PASSWORD_MAX + 1];
+    vapor_account     acct;
+    vapor_server_info info;
+    int               rc;
+
+    if (vapor_require_server(vc, &info) != 0) {
+        fprintf(stderr, "vapor: %s\n", vc->err);
+        return 1;
+    }
+    if (!info.registration_open) {
+        fprintf(stderr, "vapor: registration is closed on this server\n");
+        return 1;
+    }
+    if (!info.has_users) {
+        printf("note: no accounts yet; this one becomes admin\n");
+    }
 
     if (arg_user) {
         snprintf(username, sizeof(username), "%s", arg_user);
@@ -194,8 +207,8 @@ cmd_register(vapor_client *vc, const char *arg_user)
         return 1;
     }
 
-    printf("created account \"%s\"%s\n", acct.username,
-           acct.is_admin ? " (admin)" : "");
+    printf("created account \"%s\"%s on %s\n", acct.username,
+           acct.is_admin ? " (admin)" : "", vc->cfg.server_url);
     printf("run \"vapor login\" to sign in.\n");
     return 0;
 }
@@ -206,6 +219,11 @@ cmd_login(vapor_client *vc, const char *arg_user)
     char username[VAPOR_USERNAME_MAX + 1];
     char password[VAPOR_PASSWORD_MAX + 1];
     int  rc;
+
+    if (vapor_require_server(vc, NULL) != 0) {
+        fprintf(stderr, "vapor: %s\n", vc->err);
+        return 1;
+    }
 
     if (arg_user) {
         snprintf(username, sizeof(username), "%s", arg_user);
@@ -565,21 +583,13 @@ cmd_config(vapor_client *vc, int argc, char **argv)
     }
 
     if (strcmp(argv[0], "server") == 0 && argc == 2) {
-        size_t n;
-        if (!vapor_str_has_prefix(argv[1], "http://")
-            && !vapor_str_has_prefix(argv[1], "https://")) {
-            fprintf(stderr, "vapor: server URL must start with http:// or https://\n");
+        int had_token = vc->cfg.token[0] != '\0';
+
+        if (vapor_client_set_server_url(vc, argv[1]) != 0) {
+            fprintf(stderr, "vapor: %s\n", vc->err);
             return 1;
         }
-        snprintf(vc->cfg.server_url, sizeof(vc->cfg.server_url), "%s", argv[1]);
-        n = strlen(vc->cfg.server_url);
-        while (n > 0 && vc->cfg.server_url[n - 1] == '/') {
-            vc->cfg.server_url[--n] = '\0';
-        }
-        /* The old token belongs to the old server. */
-        if (vc->cfg.token[0]) {
-            vc->cfg.token[0] = '\0';
-            vc->cfg.token_expires_at = 0;
+        if (had_token && !vc->cfg.token[0]) {
             printf("note: cleared the stored session because the server changed\n");
         }
         if (vapor_client_save_config(vc) != 0) {

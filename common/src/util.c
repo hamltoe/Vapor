@@ -6,6 +6,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "vapor/protocol.h"
+
 int
 vapor_id_is_valid(const char *id)
 {
@@ -32,6 +34,29 @@ vapor_id_is_valid(const char *id)
     }
     if (strstr(id, "..") != NULL) {
         return 0;
+    }
+    return 1;
+}
+
+int
+vapor_username_is_valid(const char *username)
+{
+    size_t i, n;
+
+    if (!username) {
+        return 0;
+    }
+    n = strlen(username);
+    if (n < VAPOR_USERNAME_MIN || n > VAPOR_USERNAME_MAX) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        char ch = username[i];
+        int  ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+               || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.';
+        if (!ok) {
+            return 0;
+        }
     }
     return 1;
 }

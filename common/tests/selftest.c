@@ -133,6 +133,20 @@ test_id_validation(void)
 }
 
 static void
+test_username_validation(void)
+{
+    puts("username_is_valid");
+    check(vapor_username_is_valid("ada"), "short name");
+    check(vapor_username_is_valid("Ada_Lovelace"), "mixed case and underscore");
+    check(vapor_username_is_valid("user-1.2"), "dash and dot");
+    check(!vapor_username_is_valid(""), "empty rejected");
+    check(!vapor_username_is_valid(NULL), "NULL rejected");
+    check(!vapor_username_is_valid("ab"), "too short");
+    check(!vapor_username_is_valid("has space"), "space rejected");
+    check(!vapor_username_is_valid("bad@name"), "at-sign rejected");
+}
+
+static void
 test_glob(void)
 {
     puts("glob_match");
@@ -279,6 +293,7 @@ main(void)
     test_sha256();
     test_version_cmp();
     test_id_validation();
+    test_username_validation();
     test_glob();
     test_buf();
     test_manifest_roundtrip();
