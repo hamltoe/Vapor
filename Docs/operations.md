@@ -113,7 +113,7 @@ Point `library_root` at a directory of games (config `library_root`, or
     HollowKnight.zip      # preferred: served in place
     cover.png             # optional
   Some RPG/
-    disc.iso              # wrapped into content_root as package.zip;
+    disc.iso              # unpacked into content_root as package.zip;
                           # original left in place
   Portable Game/
     Game.exe              # unpacked tree; zipped into content_root
@@ -125,9 +125,10 @@ Point `library_root` at a directory of games (config `library_root`, or
 
 The folder name becomes the catalog title; a slug of that name is the
 id (`Hollow Knight` → `hollow-knight`). Discovery prefers a zip, then
-an unpacked executable tree, then an ISO. An ISO is stored into a zip
-without compression (disc images do not deflate) and the manifest
-points at that zip. Executables named `setup.exe`
+an unpacked executable tree, then an ISO. An ISO is unpacked (ISO 9660 /
+Joliet). If the disc ships a Wise installer, that is unpacked too and
+those files are zipped; the original disc image is left in
+the drop folder. Executables named `setup.exe`
 and similar are ignored when a real game binary is present.
 
 Drop a new folder in and wait up to `discover_interval` seconds (or run

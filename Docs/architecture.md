@@ -123,7 +123,8 @@ subdirectory is one game. Discovery runs at startup and then every
 folders are fingerprint-skipped so large archives are not re-hashed.
 
 Zip files already sitting in `library_root` are served in place.
-ISO files are stored (not deflated) into
+ISO files are unpacked (ISO 9660 / Joliet). A Wise `SETUP.EXE` on the disc
+is unpacked too, and the files are zipped into
 `<content_root>/<game_id>/<version>/package.zip`; the original disc image
 is left in the drop folder. Folders of loose files are zipped into the
 same content path. Every path segment is validated

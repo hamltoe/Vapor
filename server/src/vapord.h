@@ -164,8 +164,11 @@ int vapord_library_resolve(const vapord_config *cfg, const char *rel,
 /* Scan library_root, register new or changed game folders, drop vanished ones.
  * Safe to call repeatedly; unchanged folders are skipped after a cheap
  * fingerprint compare so multi-gigabyte archives are not re-hashed.
- * Zip files in the drop folder are served in place. ISO files are wrapped
- * into a zip under content_root; the original disc image is left alone. */
+ * Zip files in the drop folder are served in place. ISO files are unpacked
+ * (and a bundled Wise SETUP.EXE is unpacked too) and the files are zipped
+ * under content_root; the original disc image is left alone. CD-only leftovers
+ * such as autorun and tiny HL.DAT stubs are stripped so the tree matches a
+ * SETUP install. */
 int vapord_discover(vapord *app);
 
 /* --------------------------------------------------------------------- log */

@@ -5,10 +5,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "miniz.h"
 #include "vapor/buf.h"
+#include "vapor/iso9660.h"
 #include "vapor/manifest.h"
 #include "vapor/sha256.h"
 #include "vapor/util.h"
+#include "vapor/wise.h"
+
+#include <stdint.h>
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 static int failures;
 
@@ -333,6 +344,320 @@ test_manifest_roundtrip(void)
     }
 }
 
+static void
+both16(unsigned char *p, uint16_t v)
+{
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 8);
+    p[3] = (unsigned char)v;
+}
+
+static void
+both32(unsigned char *p, uint32_t v)
+{
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+    p[4] = (unsigned char)(v >> 24);
+    p[5] = (unsigned char)(v >> 16);
+    p[6] = (unsigned char)(v >> 8);
+    p[7] = (unsigned char)v;
+}
+
+static void
+dirent_dot(unsigned char *p, uint32_t lba, uint32_t size, int parent)
+{
+    memset(p, 0, 34);
+    p[0] = 34;
+    both32(p + 2, lba);
+    both32(p + 10, size);
+    p[25] = 0x02;
+    p[32] = 1;
+    p[33] = parent ? 1 : 0;
+}
+
+static void
+test_iso9660(void)
+{
+    static const char payload[] = "hello-iso\n";
+    unsigned char     img[2048 * 20];
+    unsigned char    *pvd, *root, *file_rec;
+    FILE             *f;
+    char              err[128];
+    char              got[32];
+    const char       *iso_path = "vapor-iso-selftest.iso";
+    const char       *out_dir = "vapor-iso-selftest-out";
+    const char       *out_file = "vapor-iso-selftest-out/HELLO.TXT";
+
+    puts("iso9660");
+    memset(img, 0, sizeof(img));
+    pvd = img + 16 * 2048;
+    pvd[0] = 1;
+    memcpy(pvd + 1, "CD001", 5);
+    pvd[6] = 1;
+    memcpy(pvd + 40, "VAPORTEST", 9);
+    both32(pvd + 80, 20);
+    both16(pvd + 128, 2048);
+    dirent_dot(pvd + 156, 18, 2048, 0);
+
+    img[17 * 2048] = 255;
+    memcpy(img + 17 * 2048 + 1, "CD001", 5);
+    img[17 * 2048 + 6] = 1;
+
+    root = img + 18 * 2048;
+    dirent_dot(root, 18, 2048, 0);
+    dirent_dot(root + 34, 18, 2048, 1);
+    file_rec = root + 68;
+    memset(file_rec, 0, 48);
+    file_rec[0] = 44;
+    both32(file_rec + 2, 19);
+    both32(file_rec + 10, (uint32_t)(sizeof(payload) - 1));
+    file_rec[32] = 11;
+    memcpy(file_rec + 33, "HELLO.TXT;1", 11);
+
+    memcpy(img + 19 * 2048, payload, sizeof(payload) - 1);
+
+    f = fopen(iso_path, "wb");
+    check(f != NULL, "writes a test ISO");
+    if (!f) {
+        return;
+    }
+    check(fwrite(img, 1, sizeof(img), f) == sizeof(img), "ISO bytes written");
+    fclose(f);
+
+    check(vapor_iso_extract("not-a-real-iso-file", out_dir, err, sizeof(err))
+              != 0,
+          "rejects missing ISO");
+    check(vapor_iso_extract(iso_path, out_dir, err, sizeof(err)) == 0,
+          "extracts a minimal ISO");
+    f = fopen(out_file, "rb");
+    check(f != NULL, "extracted HELLO.TXT");
+    if (f) {
+        size_t n = fread(got, 1, sizeof(got) - 1, f);
+        got[n] = '\0';
+        fclose(f);
+        check(strcmp(got, payload) == 0, "ISO file contents");
+    }
+    remove(out_file);
+    remove(iso_path);
+#if defined(_WIN32)
+    _rmdir(out_dir);
+#else
+    rmdir(out_dir);
+#endif
+}
+
+static void
+put_u16(unsigned char *p, uint16_t v)
+{
+    p[0] = (unsigned char)(v & 0xff);
+    p[1] = (unsigned char)((v >> 8) & 0xff);
+}
+
+static void
+put_u32(unsigned char *p, uint32_t v)
+{
+    p[0] = (unsigned char)(v & 0xff);
+    p[1] = (unsigned char)((v >> 8) & 0xff);
+    p[2] = (unsigned char)((v >> 16) & 0xff);
+    p[3] = (unsigned char)((v >> 24) & 0xff);
+}
+
+static int
+deflate_raw(const void *src, size_t n, unsigned char **out, size_t *out_len)
+{
+    *out = (unsigned char *)tdefl_compress_mem_to_heap(src, n, out_len,
+                                                       TDEFL_DEFAULT_MAX_PROBES);
+    return (*out && *out_len) ? 0 : -1;
+}
+
+static void
+test_wise(void)
+{
+    static const char hello[] = "hello-wise\n";
+    static const char dib[] = "DIBDUMMY";
+    unsigned char     script[128];
+    unsigned char    *dib_c = NULL, *hello_c = NULL, *script_c = NULL;
+    unsigned char    *pe = NULL, *ov, *wp;
+    size_t            dib_n = 0, hello_n = 0, script_n = 0, ov_len, pe_len;
+    uint32_t          crc, e_lfanew = 0x80, optsz = 224, raw_ptr = 0x200;
+    uint32_t          raw_sz = 0x200, overlay_off, sec_off;
+    FILE             *f;
+    char              err[128];
+    char              got[32];
+    const char       *exe_path = "vapor-wise-selftest.exe";
+    const char       *out_dir = "vapor-wise-selftest-out";
+    const char       *out_file = "vapor-wise-selftest-out/hello.txt";
+
+    puts("wise");
+    check(vapor_wise_extract("not-a-real-setup.exe", out_dir, err, sizeof(err))
+              == 1,
+          "rejects missing installer");
+
+    check(deflate_raw(dib, sizeof(dib) - 1, &dib_c, &dib_n) == 0, "deflates dib");
+    check(deflate_raw(hello, sizeof(hello) - 1, &hello_c, &hello_n) == 0,
+          "deflates payload");
+    if (!dib_c || !hello_c) {
+        return;
+    }
+    crc = (uint32_t)mz_crc32(MZ_CRC32_INIT, (const unsigned char *)hello,
+                             sizeof(hello) - 1);
+    memset(script, 0, sizeof(script));
+    script[16] = 0x00;
+    script[17] = 0x80;
+    script[18] = 0x00;
+    put_u32(script + 19, 0);
+    put_u32(script + 23, (uint32_t)(hello_n + 4));
+    put_u32(script + 31, (uint32_t)(sizeof(hello) - 1));
+    put_u32(script + 55, crc);
+    memcpy(script + 59, "%MAINDIR%\\hello.txt", 20);
+    check(deflate_raw(script, 80, &script_c, &script_n) == 0, "deflates script");
+    if (!script_c) {
+        mz_free(dib_c);
+        mz_free(hello_c);
+        return;
+    }
+
+    overlay_off = raw_ptr + raw_sz;
+    ov_len = 64 + 40 + dib_n + 4 + script_n + 4 + hello_n + 4;
+    pe_len = overlay_off + ov_len + 16;
+    pe = (unsigned char *)calloc(1, pe_len);
+    check(pe != NULL, "allocates mini PE");
+    if (!pe) {
+        mz_free(dib_c);
+        mz_free(hello_c);
+        mz_free(script_c);
+        return;
+    }
+    pe[0] = 'M';
+    pe[1] = 'Z';
+    put_u32(pe + 0x3c, e_lfanew);
+    memcpy(pe + e_lfanew, "PE\0\0", 4);
+    put_u16(pe + e_lfanew + 4, 0x14c);
+    put_u16(pe + e_lfanew + 6, 1);
+    put_u16(pe + e_lfanew + 20, (uint16_t)optsz);
+    put_u16(pe + e_lfanew + 22, 0x0102);
+    put_u16(pe + e_lfanew + 24, 0x10b);
+    sec_off = e_lfanew + 24 + optsz;
+    memcpy(pe + sec_off, ".text", 5);
+    put_u32(pe + sec_off + 8, raw_sz);
+    put_u32(pe + sec_off + 12, 0x1000);
+    put_u32(pe + sec_off + 16, raw_sz);
+    put_u32(pe + sec_off + 20, raw_ptr);
+
+    ov = pe + overlay_off;
+    wp = ov + 32;
+    memcpy(wp, "Initializing Wise Installation Wizard", 37);
+    wp += 38;
+    memcpy(wp, dib_c, dib_n);
+    wp += dib_n;
+    put_u32(wp, (uint32_t)mz_crc32(MZ_CRC32_INIT, (const unsigned char *)dib,
+                                   sizeof(dib) - 1));
+    wp += 4;
+    memcpy(wp, script_c, script_n);
+    wp += script_n;
+    put_u32(wp, (uint32_t)mz_crc32(MZ_CRC32_INIT, script, 80));
+    wp += 4;
+    memcpy(wp, hello_c, hello_n);
+    wp += hello_n;
+    put_u32(wp, crc);
+
+    f = fopen(exe_path, "wb");
+    check(f != NULL, "writes a test Wise installer");
+    if (f) {
+        size_t n = (size_t)(wp - pe);
+        check(fwrite(pe, 1, n, f) == n, "Wise PE bytes written");
+        fclose(f);
+    }
+    check(vapor_wise_extract(exe_path, out_dir, err, sizeof(err)) == 0,
+          "extracts a minimal Wise installer");
+    f = fopen(out_file, "rb");
+    check(f != NULL, "extracted hello.txt");
+    if (f) {
+        size_t n = fread(got, 1, sizeof(got) - 1, f);
+        got[n] = '\0';
+        fclose(f);
+        check(strcmp(got, hello) == 0, "Wise file contents");
+    }
+    remove(out_file);
+    remove(exe_path);
+#if defined(_WIN32)
+    _rmdir(out_dir);
+#else
+    rmdir(out_dir);
+#endif
+    mz_free(dib_c);
+    mz_free(hello_c);
+    mz_free(script_c);
+    free(pe);
+}
+
+static void
+test_disc_finish_install(void)
+{
+    const char *dir = "vapor-disc-selftest-out";
+    const char *stub = "vapor-disc-selftest-out/HL.DAT";
+    const char *autorun = "vapor-disc-selftest-out/AUTORUN.EXE";
+    const char *keep = "vapor-disc-selftest-out/keep.dat";
+    FILE       *f;
+    unsigned char buf[128];
+
+    puts("disc_finish_install");
+#if defined(_WIN32)
+    _mkdir(dir);
+#else
+    mkdir(dir, 0755);
+#endif
+    f = fopen(stub, "wb");
+    check(f != NULL, "writes tiny HL.DAT stub");
+    if (f) {
+        fwrite("stub", 1, 4, f);
+        fclose(f);
+    }
+    f = fopen(autorun, "wb");
+    check(f != NULL, "writes AUTORUN.EXE");
+    if (f) {
+        fwrite("x", 1, 1, f);
+        fclose(f);
+    }
+    memset(buf, 0xab, sizeof(buf));
+    f = fopen(keep, "wb");
+    check(f != NULL, "writes a large data file");
+    if (f) {
+        fwrite(buf, 1, sizeof(buf), f);
+        fclose(f);
+    }
+
+    vapor_disc_finish_install(dir);
+
+    f = fopen(stub, "rb");
+    check(f == NULL, "removes tiny HL.DAT stub");
+    if (f) {
+        fclose(f);
+    }
+    f = fopen(autorun, "rb");
+    check(f == NULL, "removes AUTORUN.EXE");
+    if (f) {
+        fclose(f);
+    }
+    f = fopen(keep, "rb");
+    check(f != NULL, "leaves other files alone");
+    if (f) {
+        fclose(f);
+    }
+
+    remove(stub);
+    remove(autorun);
+    remove(keep);
+#if defined(_WIN32)
+    _rmdir(dir);
+#else
+    rmdir(dir);
+#endif
+}
+
 int
 main(void)
 {
@@ -347,6 +672,9 @@ main(void)
     test_glob();
     test_buf();
     test_manifest_roundtrip();
+    test_iso9660();
+    test_wise();
+    test_disc_finish_install();
 
     printf("\n%s\n", failures ? "FAILED" : "all checks passed");
     return failures ? 1 : 0;

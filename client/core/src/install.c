@@ -12,8 +12,10 @@
 #include "net.h"
 #include "platform.h"
 #include "vapor/buf.h"
+#include "vapor/iso9660.h"
 #include "vapor/sha256.h"
 #include "vapor/util.h"
+#include "vapor/wise.h"
 
 /* Kept inside the install directory so uninstall is a single tree removal and
  * launching works with the server unreachable. */
@@ -449,13 +451,52 @@ looks_iso_name(const char *name)
 }
 
 static int
+is_disc_installer_name(const char *base)
+{
+    return vapor_str_eq_ci(base, "setup.exe")
+        || vapor_str_eq_ci(base, "install.exe")
+        || vapor_str_eq_ci(base, "installer.exe");
+}
+
+typedef struct {
+    const char *root;
+    int         unpacked;
+} wise_scan;
+
+static int
+wise_install_cb(const char *rel, const char *abs, void *ud)
+{
+    wise_scan  *s = ud;
+    const char *base = rel;
+    const char *slash = strrchr(rel, '/');
+    char        err[256];
+
+    if (slash) {
+        base = slash + 1;
+    }
+    if (!is_disc_installer_name(base)) {
+        return 0;
+    }
+    memset(err, 0, sizeof(err));
+    printf("extracting installer %s\n", rel);
+    if (vapor_wise_extract(abs, s->root, err, sizeof(err)) == 0) {
+        remove(abs);
+        s->unpacked = 1;
+    } else if (err[0]) {
+        printf("  installer unpack failed (%s); leaving it in place\n", err);
+    }
+    return 0;
+}
+
+static int
 is_junk_exec(const char *base)
 {
     static const char *const junk[] = {
         "setup.exe", "install.exe", "installer.exe", "unins000.exe",
-        "uninstall.exe", "dxsetup.exe", "vcredist", "vc_redist",
+        "uninstall.exe", "dxsetup.exe", "autorun.exe", "vcredist", "vc_redist",
         "unitycrashhandler", "crashreporter", "easyanticheat",
-        "dotnetfx", NULL
+        "dotnetfx", "hlds.exe", "hltv.exe", "upd.exe", "sierraup.exe",
+        "opforup.exe", "voice_tweak.exe", "qfiles.exe", NULL
     };
     size_t i;
 
@@ -467,6 +508,9 @@ is_junk_exec(const char *base)
     }
     if (vapor_str_has_prefix(base, "unins")
         && vapor_str_ends_with_ci(base, ".exe")) {
+        return 1;
+    }
+    if (vapor_str_ends_with_ci(base, "update.exe")) {
         return 1;
     }
     return 0;
@@ -687,6 +731,7 @@ vapor_install_game(vapor_client *vc, const char *game_id, const char *version,
     size_t              nfiles = 0, nexec = 0;
     int                 have_existing, rc = -1;
     int                 has_iso = 0;
+    int                 unpacked_iso = 0;
     char                iso_rel[VAPOR_PATH_MAX] = "";
 
     if (!opts) {
@@ -832,6 +877,53 @@ verified:
         vapor_manifest_free(&m);
         return -1;
     }
+    if (has_iso && iso_rel[0]) {
+        char iso_path[VAPOR_PATH_MAX];
+        char iso_err[256];
+
+        if (join(iso_path, sizeof(iso_path), install_dir, iso_rel) != 0) {
+            vapor_client_set_error(vc, "install path is too long");
+            vapor_plat_remove_tree(install_dir);
+            vapor_manifest_free(&m);
+            return -1;
+        }
+        vapor_plat_native_path(iso_path);
+        printf("extracting disc image %s\n", iso_rel);
+        if (vapor_iso_extract(iso_path, install_dir, iso_err, sizeof(iso_err))
+            != 0) {
+            printf("  disc unpack failed (%s); leaving the image in place\n",
+                   iso_err);
+        } else {
+            remove(iso_path);
+            has_iso = 0;
+            unpacked_iso = 1;
+            iso_rel[0] = '\0';
+            if (discover_install_content(vc, install_dir, &m, &has_iso, iso_rel,
+                                         sizeof(iso_rel))
+                != 0) {
+                vapor_plat_remove_tree(install_dir);
+                vapor_manifest_free(&m);
+                return -1;
+            }
+        }
+    }
+    {
+        wise_scan ws;
+
+        memset(&ws, 0, sizeof(ws));
+        ws.root = install_dir;
+        vapor_plat_walk_files(install_dir, wise_install_cb, &ws);
+        vapor_disc_finish_install(install_dir);
+        if (ws.unpacked) {
+            if (discover_install_content(vc, install_dir, &m, &has_iso, iso_rel,
+                                         sizeof(iso_rel))
+                != 0) {
+                vapor_plat_remove_tree(install_dir);
+                vapor_manifest_free(&m);
+                return -1;
+            }
+        }
+    }
     target = vapor_manifest_pick_target(&m, vapor_host_platform(),
                                         vapor_host_arch());
     if (target) {
@@ -885,6 +977,9 @@ verified:
         }
         if (has_iso) {
             printf("  disc image . %s\n", iso_rel[0] ? iso_rel : "(found)");
+        }
+        if (unpacked_iso) {
+            printf("  disc image . unpacked into the install directory\n");
         }
         if (!target && has_iso) {
             printf("  launch ..... disc image (no native executable)\n");

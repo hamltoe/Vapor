@@ -10,6 +10,7 @@
 #include "platform.h"
 #include "vapor/buf.h"
 #include "vapor/util.h"
+#include "vapor/wise.h"
 
 /* Expands $INSTALL_DIR and ${INSTALL_DIR}. Deliberately the only variable we
  * substitute: manifests should not be able to read arbitrary host environment
@@ -102,6 +103,7 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
         return -1;
     }
     snprintf(install_dir, sizeof(install_dir), "%s", rec.install_dir);
+    vapor_disc_finish_install(install_dir);
 
     if (vapor_read_local_manifest(vc, game_id, &m) != 0) {
         return -1;

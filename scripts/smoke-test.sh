@@ -154,15 +154,63 @@ check "uninstall discovered game" "removed" -- vapor uninstall smoke-portable
 step "auto-discovery of a disc image"
 discsrc="${work}/library/Smoke Disc"
 mkdir -p "${discsrc}"
-printf 'fake-iso-bytes' > "${discsrc}/game.iso"
+python3 - "${discsrc}/game.iso" <<'PY'
+import struct, sys
+payload = b"#!/usr/bin/env bash\necho disc-ok\nexit 0\n"
+name = b"SMOKE.SH;1"
+img = bytearray(2048 * 20)
+
+def both16(p, v):
+    img[p:p+2] = struct.pack("<H", v)
+    img[p+2:p+4] = struct.pack(">H", v)
+
+def both32(p, v):
+    img[p:p+4] = struct.pack("<I", v)
+    img[p+4:p+8] = struct.pack(">I", v)
+
+def dir_dot(p, lba, size, parent):
+    img[p] = 34
+    both32(p + 2, lba)
+    both32(p + 10, size)
+    img[p + 25] = 2
+    img[p + 32] = 1
+    img[p + 33] = 1 if parent else 0
+
+pvd = 16 * 2048
+img[pvd] = 1
+img[pvd+1:pvd+6] = b"CD001"
+img[pvd+6] = 1
+img[pvd+40:pvd+49] = b"VAPORTEST"
+both32(pvd + 80, 20)
+both16(pvd + 128, 2048)
+dir_dot(pvd + 156, 18, 2048, 0)
+img[17*2048] = 255
+img[17*2048+1:17*2048+6] = b"CD001"
+img[17*2048+6] = 1
+root = 18 * 2048
+dir_dot(root, 18, 2048, 0)
+dir_dot(root + 34, 18, 2048, 1)
+rec = root + 68
+nlen = len(name)
+rec_len = 33 + nlen
+if rec_len % 2:
+    rec_len += 1
+img[rec] = rec_len
+both32(rec + 2, 19)
+both32(rec + 10, len(payload))
+img[rec + 32] = nlen
+img[rec+33:rec+33+nlen] = name
+img[19*2048:19*2048+len(payload)] = payload
+open(sys.argv[1], "wb").write(img)
+PY
 
 check "admin discover iso" "smoke-disc" -- admin discover
 check "list shows disc game" "Smoke Disc" -- vapor list
 check "install disc game" "installed" -- vapor install smoke-disc
-if [ -f "${work}/games/smoke-disc/game.iso" ]; then
-    ok "iso extracted from wrapped zip"
+if [ -f "${work}/games/smoke-disc/SMOKE.SH" ] || [ -f "${work}/games/smoke-disc/smoke.sh" ]; then
+    ok "iso contents unpacked"
 else
-    bad "iso extracted from wrapped zip"
+    bad "iso contents unpacked"
 fi
 if [ -f "${discsrc}/game.iso" ]; then
     ok "original iso left in library"
@@ -170,11 +218,11 @@ else
     bad "original iso left in library"
 fi
 if ls "${work}/content/smoke-disc/"*/package.zip >/dev/null 2>&1; then
-    ok "iso wrapped into content zip"
+    ok "unpacked iso packaged as zip"
 else
-    bad "iso wrapped into content zip"
+    bad "unpacked iso packaged as zip"
 fi
-check_fails "disc image cannot launch" vapor launch smoke-disc
+check "launch unpacked disc game" "disc-ok" -- vapor launch smoke-disc
 check "uninstall disc game" "removed" -- vapor uninstall smoke-disc
 
 step "catalog"

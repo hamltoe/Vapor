@@ -14,25 +14,30 @@
  *       data/
  *
  * Zip files already sitting in library_root are served in place. An ISO is
- * stored (not deflated) into <content_root>/<id>/<version>/package.zip; the
- * original disc image is left alone. A folder of loose files is zipped the
- * same way. Unchanged folders are fingerprint-skipped so large archives are
- * not re-hashed.
+ * unpacked (ISO 9660 / Joliet); a Wise SETUP.EXE on the disc is unpacked
+ * too, and the files are zipped into
+ * <content_root>/<id>/<version>/package.zip; the original disc image is left
+ * in the drop folder. A folder of loose files is zipped the same way.
+ * Unchanged folders are fingerprint-skipped so large archives are not
+ * re-hashed.
  */
 
 #include "vapord.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/types.h>
+#include <unistd.h>
 
 #include "miniz.h"
+#include "vapor/iso9660.h"
 #include "vapor/sha256.h"
 #include "vapor/util.h"
+#include "vapor/wise.h"
 
 #define PACKAGED_ZIP "package.zip"
 
@@ -145,6 +150,217 @@ copy_file(const char *src, const char *dst)
 }
 
 static int
+rm_tree(const char *path)
+{
+    DIR           *d;
+    struct dirent *ent;
+    struct stat    st;
+
+    if (lstat(path, &st) != 0) {
+        return 0;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        return unlink(path) == 0 ? 0 : -1;
+    }
+    d = opendir(path);
+    if (!d) {
+        return -1;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        char child[VAPORD_PATH_MAX];
+
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        if (join2(child, sizeof(child), path, ent->d_name) != 0
+            || rm_tree(child) != 0) {
+            closedir(d);
+            return -1;
+        }
+    }
+    closedir(d);
+    return rmdir(path) == 0 ? 0 : -1;
+}
+
+static int
+is_all_upper(const char *s)
+{
+    int letters = 0;
+
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (isalpha(c)) {
+            letters = 1;
+            if (islower(c)) {
+                return 0;
+            }
+        }
+    }
+    return letters;
+}
+
+static int
+merge_tree_into(const char *src, const char *dst)
+{
+    DIR           *d;
+    struct dirent *ent;
+
+    if (mkdir(dst, 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    d = opendir(src);
+    if (!d) {
+        return -1;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        char        from[VAPORD_PATH_MAX], to[VAPORD_PATH_MAX];
+        struct stat st_from, st_to;
+        int         have_to;
+
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        if (join2(from, sizeof(from), src, ent->d_name) != 0
+            || join2(to, sizeof(to), dst, ent->d_name) != 0) {
+            closedir(d);
+            return -1;
+        }
+        if (lstat(from, &st_from) != 0) {
+            continue;
+        }
+        have_to = lstat(to, &st_to) == 0;
+        if (S_ISDIR(st_from.st_mode)) {
+            if (have_to && S_ISDIR(st_to.st_mode)) {
+                if (merge_tree_into(from, to) != 0 || rmdir(from) != 0) {
+                    closedir(d);
+                    return -1;
+                }
+            } else if (!have_to) {
+                if (rename(from, to) != 0) {
+                    closedir(d);
+                    return -1;
+                }
+            } else if (rm_tree(from) != 0) {
+                closedir(d);
+                return -1;
+            }
+        } else if (!have_to) {
+            if (rename(from, to) != 0) {
+                closedir(d);
+                return -1;
+            }
+        } else if (unlink(from) != 0) {
+            closedir(d);
+            return -1;
+        }
+    }
+    closedir(d);
+    return 0;
+}
+
+/* ISO 9660 names are often ALLCAPS; Wise scripts use mixed case. On a
+ * case-insensitive client those trees collide, so fold them here and let
+ * the installer copy win. */
+static void
+fold_case_collisions(const char *dir)
+{
+    int changed;
+
+    do {
+        strlist        names;
+        size_t         i, j;
+        DIR           *d;
+        struct dirent *ent;
+
+        changed = 0;
+        memset(&names, 0, sizeof(names));
+        d = opendir(dir);
+        if (!d) {
+            return;
+        }
+        while ((ent = readdir(d)) != NULL) {
+            if (strcmp(ent->d_name, ".") == 0
+                || strcmp(ent->d_name, "..") == 0) {
+                continue;
+            }
+            if (strlist_push(&names, ent->d_name) != 0) {
+                closedir(d);
+                strlist_free(&names);
+                return;
+            }
+        }
+        closedir(d);
+
+        for (i = 0; i < names.count && !changed; i++) {
+            for (j = i + 1; j < names.count; j++) {
+                char        path_i[VAPORD_PATH_MAX], path_j[VAPORD_PATH_MAX];
+                struct stat st_i, st_j;
+                int         i_dir, j_dir;
+
+                if (!vapor_str_eq_ci(names.items[i], names.items[j])) {
+                    continue;
+                }
+                if (join2(path_i, sizeof(path_i), dir, names.items[i]) != 0
+                    || join2(path_j, sizeof(path_j), dir, names.items[j]) != 0
+                    || lstat(path_i, &st_i) != 0 || lstat(path_j, &st_j) != 0) {
+                    continue;
+                }
+                i_dir = S_ISDIR(st_i.st_mode);
+                j_dir = S_ISDIR(st_j.st_mode);
+                if (i_dir && j_dir) {
+                    if (is_all_upper(names.items[i])
+                        && !is_all_upper(names.items[j])) {
+                        if (merge_tree_into(path_i, path_j) == 0) {
+                            rmdir(path_i);
+                        }
+                    } else if (merge_tree_into(path_j, path_i) == 0) {
+                        rmdir(path_j);
+                    }
+                    changed = 1;
+                    break;
+                }
+                if (!i_dir && !j_dir) {
+                    if (st_i.st_mtime >= st_j.st_mtime) {
+                        unlink(path_j);
+                    } else {
+                        unlink(path_i);
+                    }
+                    changed = 1;
+                    break;
+                }
+            }
+        }
+        strlist_free(&names);
+    } while (changed);
+
+    {
+        DIR           *d;
+        struct dirent *ent;
+
+        d = opendir(dir);
+        if (!d) {
+            return;
+        }
+        while ((ent = readdir(d)) != NULL) {
+            char        child[VAPORD_PATH_MAX];
+            struct stat st;
+
+            if (strcmp(ent->d_name, ".") == 0
+                || strcmp(ent->d_name, "..") == 0) {
+                continue;
+            }
+            if (join2(child, sizeof(child), dir, ent->d_name) != 0) {
+                continue;
+            }
+            if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+                fold_case_collisions(child);
+            }
+        }
+        closedir(d);
+    }
+}
+
+static int
 skip_walk_dir(const char *name)
 {
     return strcmp(name, ".") == 0 || strcmp(name, "..") == 0
@@ -156,13 +372,57 @@ skip_walk_dir(const char *name)
 }
 
 static int
+is_disc_installer_name(const char *base)
+{
+    return vapor_str_eq_ci(base, "setup.exe")
+        || vapor_str_eq_ci(base, "install.exe")
+        || vapor_str_eq_ci(base, "installer.exe");
+}
+
+static int
+unpack_wise_installers(const char *dir)
+{
+    DIR           *d;
+    struct dirent *ent;
+    int            n = 0;
+
+    d = opendir(dir);
+    if (!d) {
+        return 0;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        char path[VAPORD_PATH_MAX];
+        char err[256];
+
+        if (ent->d_name[0] == '.' || !is_disc_installer_name(ent->d_name)) {
+            continue;
+        }
+        if (join2(path, sizeof(path), dir, ent->d_name) != 0) {
+            continue;
+        }
+        memset(err, 0, sizeof(err));
+        VLOG_INFO("discover: unpacking installer \"%s\"", ent->d_name);
+        if (vapor_wise_extract(path, dir, err, sizeof(err)) == 0) {
+            unlink(path);
+            n++;
+        } else if (err[0]) {
+            VLOG_WARN("discover: installer unpack of %s failed (%s)",
+                      ent->d_name, err);
+        }
+    }
+    closedir(d);
+    return n;
+}
+
+static int
 is_junk_exec(const char *base)
 {
     static const char *const junk[] = {
         "setup.exe", "install.exe", "installer.exe", "unins000.exe",
-        "uninstall.exe", "dxsetup.exe", "vcredist", "vc_redist",
+        "uninstall.exe", "dxsetup.exe", "autorun.exe", "vcredist", "vc_redist",
         "unitycrashhandler", "crashreporter", "easyanticheat",
-        "dotnetfx", NULL
+        "dotnetfx", "hlds.exe", "hltv.exe", "upd.exe", "sierraup.exe",
+        "opforup.exe", "voice_tweak.exe", "qfiles.exe", NULL
     };
     size_t i;
 
@@ -173,6 +433,9 @@ is_junk_exec(const char *base)
         }
     }
     if (vapor_str_has_prefix(base, "unins") && vapor_str_ends_with_ci(base, ".exe")) {
+        return 1;
+    }
+    if (vapor_str_ends_with_ci(base, "update.exe")) {
         return 1;
     }
     return 0;
@@ -195,16 +458,32 @@ score_exec(const char *rel, const char *want_slug, int junk_ok)
 {
     const char *base = basename_of(rel);
     int         score;
+    char        slug[VAPOR_ID_MAX + 1];
 
     if (!junk_ok && is_junk_exec(base)) {
         return -1;
     }
     score = 200 - path_depth(rel) * 15;
-    if (want_slug && *want_slug) {
-        char slug[VAPOR_ID_MAX + 1];
-        if (vapor_id_slug(base, slug, sizeof(slug)) == 0
-            && strcmp(slug, want_slug) == 0) {
+    if (want_slug && *want_slug && vapor_id_slug(base, slug, sizeof(slug)) == 0) {
+        if (strcmp(slug, want_slug) == 0) {
             score += 80;
+        } else {
+            char init[16];
+            size_t o = 0, i;
+            int    word = 1;
+            for (i = 0; want_slug[i] && o + 1 < sizeof(init); i++) {
+                if (want_slug[i] == '-') {
+                    word = 1;
+                } else if (word) {
+                    init[o++] = want_slug[i];
+                    word = 0;
+                }
+            }
+            init[o] = '\0';
+            if (o >= 2 && vapor_str_has_prefix(slug, init)
+                && (slug[o] == '\0' || slug[o] == '-')) {
+                score += 50;
+            }
         }
     }
     return score;
@@ -1068,6 +1347,10 @@ publish_game(vapord *app, const char *folder, const char *abs_dir,
     int            in_place = (package_rel && package_rel[0]);
     int            wrap_file = !in_place && package_abs && package_abs[0];
     int            rc = -1;
+    char           win_found[VAPORD_PATH_MAX] = "";
+    char           lin_found[VAPORD_PATH_MAX] = "";
+    char           extract_dir[VAPORD_PATH_MAX];
+    char           iso_err[256];
 
     vapor_manifest_init(&m);
 
@@ -1092,12 +1375,45 @@ publish_game(vapord *app, const char *folder, const char *abs_dir,
         if (join2(pkg_path, sizeof(pkg_path), version_dir, PACKAGED_ZIP) != 0) {
             goto done;
         }
-        VLOG_INFO("discover: wrapping \"%s\" into zip (original left in place)",
-                  basename_of(package_abs));
-        if (zip_file_store(package_abs, basename_of(package_abs), pkg_path)
+        if (join2(extract_dir, sizeof(extract_dir), version_dir, ".iso-unpack")
             != 0) {
-            VLOG_WARN("discover: failed to zip \"%s\"", package_abs);
             goto done;
+        }
+        rm_tree(extract_dir);
+        VLOG_INFO("discover: unpacking disc image \"%s\"",
+                  basename_of(package_abs));
+        if (vapor_iso_extract(package_abs, extract_dir, iso_err, sizeof(iso_err))
+            != 0) {
+            VLOG_WARN("discover: cannot unpack %s (%s); wrapping the image as a file",
+                      basename_of(package_abs), iso_err);
+            if (zip_file_store(package_abs, basename_of(package_abs), pkg_path)
+                != 0) {
+                VLOG_WARN("discover: failed to zip \"%s\"", package_abs);
+                goto done;
+            }
+            allow_no_target = 1;
+        } else {
+            unpack_wise_installers(extract_dir);
+            vapor_disc_finish_install(extract_dir);
+            fold_case_collisions(extract_dir);
+            if (!(win_exec && *win_exec) && !(lin_exec && *lin_exec)) {
+                inspect_dir(extract_dir, id, win_found, sizeof(win_found),
+                            lin_found, sizeof(lin_found));
+                if (win_found[0]) {
+                    win_exec = win_found;
+                }
+                if (lin_found[0]) {
+                    lin_exec = lin_found;
+                }
+            }
+            VLOG_INFO("discover: packaging unpacked disc \"%s\"", folder);
+            if (zip_directory(extract_dir, pkg_path) != 0) {
+                rm_tree(extract_dir);
+                VLOG_WARN("discover: failed to zip unpacked ISO for \"%s\"",
+                          folder);
+                goto done;
+            }
+            rm_tree(extract_dir);
         }
         package_file = PACKAGED_ZIP;
         format = "zip";
@@ -1366,7 +1682,7 @@ process_folder(vapord *app, const char *folder)
         if (stat(pkg_abs, &st) != 0) {
             return 0;
         }
-        fingerprint_stat(wrap_iso ? "iso-wrap" : format, pkg_rel,
+        fingerprint_stat(wrap_iso ? "iso-wise3" : format, pkg_rel,
                          (uint64_t)st.st_size, (int64_t)st.st_mtime,
                          fingerprint);
         snprintf(version, sizeof(version), "%lld", (long long)st.st_mtime);
@@ -1403,7 +1719,7 @@ process_folder(vapord *app, const char *folder)
                                      source_rel[0] ? source_rel : NULL);
         if (present && probe.version
             && catalog_format_is_iso(app, id, probe.version)) {
-            VLOG_INFO("discover: \"%s\" is still catalogued as iso; wrapping as zip",
+            VLOG_INFO("discover: \"%s\" is still catalogued as iso; unpacking disc files",
                       folder);
             present = 0;
         }

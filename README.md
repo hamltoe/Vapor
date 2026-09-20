@@ -138,8 +138,9 @@ For a systemd install, TLS with Caddy, and a dedicated `vapor` user, see
 
 Drop a folder into `library_root`. Each game is one unique directory.
 Inside it, vapord accepts a zip (usual case), an ISO, or an unpacked
-tree with an executable. ISOs are wrapped into a zip for download; the
-original disc image stays in the folder:
+tree with an executable. ISOs are unpacked and the files are zipped for
+download; a Wise SETUP.EXE on the disc is unpacked too. The original
+disc image stays in the folder:
 
 ```
 run/library/

@@ -69,12 +69,18 @@ If a game later needs symlinks or fine-grained permissions, swap miniz
 for libarchive and package `.tar.zst`. `package.format` already exists
 so zip, iso, and other payloads can coexist.
 
-vapord wraps each `.iso` / `.img` it finds in `library_root` into a zip
-and points the manifest at that zip. The original disc image is left in
-place and not served. After the client extracts the zip, it inspects the
-install tree: a native executable becomes the launch target; a leftover
-`.iso` is treated as a disc image (install succeeds, launch is not
-supported yet).
+vapord unpacks each `.iso` / `.img` it finds in `library_root` (ISO 9660
+and Joliet) and zips those files for the client. If the disc includes a
+Wise `SETUP.EXE` (Half-Life GOTY and similar 1999–2003 Sierra installers),
+the packed game files such as `WONAuth.dll` are unpacked into the same
+tree and the installer executable is dropped from the zip. The original
+disc image is left in place. After the client extracts the zip, it
+inspects the install tree and picks a launchable executable (`HL.EXE` on
+a Half-Life disc, for example). `setup.exe` and `autorun.exe` are ignored
+when a real game binary is present. A leftover `SETUP.EXE` in an older zip
+is unpacked the same way on install. If the image cannot be unpacked
+(UDF-only DVDs), the ISO is wrapped as a file and the client tries the same
+unpack on install.
 
 `iso` and `file` still skip extraction for older manifests: the client
 copies the downloaded payload into the install directory.
