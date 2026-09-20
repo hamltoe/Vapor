@@ -78,7 +78,7 @@ start)
         --windows-exec 'bin/hollowvale.bat' \
         --env 'HOLLOW_DATA=$INSTALL_DIR/assets.dat' || exit 1
 
-    setsid "${bin}/vapord" -p "${port}" -H 0.0.0.0 \
+    setsid "${bin}/vapord" --headless -p "${port}" -H 0.0.0.0 \
         -r "${work}/content" -d "${work}/vapor.db" \
         > "${work}/vapord.log" 2>&1 &
     echo $! > "${work}/vapord.pid"

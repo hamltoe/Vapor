@@ -68,7 +68,7 @@ admin() { "${bin}/vapor-admin" -r "${work}/content" -L "${work}/library" \
 
 step "starting vapord on port ${port}"
 mkdir -p "${work}/library"
-"${bin}/vapord" -p "${port}" -r "${work}/content" -L "${work}/library" \
+"${bin}/vapord" --headless -p "${port}" -r "${work}/content" -L "${work}/library" \
     -d "${work}/vapor.db" \
     > "${work}/vapord.log" 2>&1 &
 server_pid=$!

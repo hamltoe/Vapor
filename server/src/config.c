@@ -14,6 +14,16 @@
 
 #include "vapor/util.h"
 
+static void (*g_log_sink)(const char *line, void *ud);
+static void *g_log_sink_ud;
+
+void
+vapord_set_log_sink(void (*fn)(const char *line, void *ud), void *ud)
+{
+    g_log_sink = fn;
+    g_log_sink_ud = ud;
+}
+
 void
 vapord_config_defaults(vapord_config *c)
 {
@@ -25,7 +35,7 @@ vapord_config_defaults(vapord_config *c)
     snprintf(c->content_root, sizeof(c->content_root), "/srv/vapor/content");
     c->library_root[0] = '\0';
     snprintf(c->db_path, sizeof(c->db_path), "/var/lib/vapor/vapor.db");
-    c->discover_interval = 60;
+    c->discover_interval = 3600;
 }
 
 static char *
@@ -191,4 +201,19 @@ vapord_log(const char *level, const char *fmt, ...)
     va_end(ap);
     fputc('\n', stderr);
     fflush(stderr);
+    if (g_log_sink) {
+        char line[320];
+        int  n;
+
+        n = snprintf(line, sizeof(line), "%s [%s] ", stamp, level);
+        if (n < 0) {
+            n = 0;
+        }
+        if ((size_t)n < sizeof(line)) {
+            va_start(ap, fmt);
+            vsnprintf(line + n, sizeof(line) - (size_t)n, fmt, ap);
+            va_end(ap);
+        }
+        g_log_sink(line, g_log_sink_ud);
+    }
 }

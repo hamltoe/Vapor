@@ -622,7 +622,7 @@ done:
 static int
 cmd_list(vapord *app)
 {
-    cJSON *catalog = vapord_catalog_json(app->db);
+    cJSON *catalog = vapord_catalog_json(app->db, 0);
     cJSON *games, *g;
     int    n = 0;
 
@@ -696,6 +696,42 @@ cmd_users(vapord *app)
     return 0;
 }
 
+static int
+cmd_enrich(vapord *app, const char *id)
+{
+    if (!id) {
+        if (vapord_meta_enrich_all(app, 1) != 0) {
+            fprintf(stderr, "vapor-admin: metadata lookup failed\n");
+            return 1;
+        }
+        return cmd_list(app);
+    }
+    if (!vapor_id_is_valid(id)) {
+        fprintf(stderr, "vapor-admin: invalid id \"%s\"\n", id);
+        return 1;
+    }
+    {
+        cJSON      *g = vapord_game_json(app->db, id, 0);
+        const cJSON *nm;
+        const cJSON *ver;
+        const char *name;
+        const char *latest;
+
+        if (!g) {
+            fprintf(stderr, "vapor-admin: no such game \"%s\"\n", id);
+            return 1;
+        }
+        nm = cJSON_GetObjectItemCaseSensitive(g, "name");
+        ver = cJSON_GetObjectItemCaseSensitive(g, "latest_version");
+        name = (cJSON_IsString(nm) && nm->valuestring) ? nm->valuestring : id;
+        latest = (cJSON_IsString(ver) && ver->valuestring) ? ver->valuestring : "";
+        vapord_meta_enrich(app, id, name, latest, 0, 1);
+        cJSON_Delete(g);
+        printf("enriched %s\n", id);
+    }
+    return 0;
+}
+
 static void
 usage(void)
 {
@@ -705,6 +741,7 @@ usage(void)
            "[-d DB] COMMAND\n\n");
     printf("  add DIR [options]   package and register a game (see add --help)\n");
     printf("  discover            scan library_root and register game folders\n");
+    printf("  enrich [ID]         fetch Steam art, description and rating\n");
     printf("  list                show the catalog\n");
     printf("  remove ID           unregister a game\n");
     printf("  users               count registered accounts\n\n");
@@ -774,6 +811,8 @@ main(int argc, char **argv)
         } else {
             rc = cmd_list(&app);
         }
+    } else if (strcmp(argv[argi], "enrich") == 0) {
+        rc = cmd_enrich(&app, argi + 1 < argc ? argv[argi + 1] : NULL);
     } else if (strcmp(argv[argi], "list") == 0) {
         rc = cmd_list(&app);
     } else if (strcmp(argv[argi], "remove") == 0) {

@@ -11,9 +11,10 @@
 #include "vapor/util.h"
 
 #define ROW_H   28.0f
-/* Cover row 72, title 22, version 16, state 16, spacer 8, buttons 28, plus
- * group padding. Anything less and the button row is silently clipped. */
-#define CARD_H  236.0f
+/* Cover, title, rating, state, optional Play. Install/verify live on the
+ * details page so the grid stays a browse view. */
+#define COVER_H 150.0f
+#define CARD_H  248.0f
 /* The narrowest a card may get before the grid drops to fewer columns. Cards
  * then stretch to share the row, so this is a minimum and not a fixed size. */
 #define CARD_W  260.0f
@@ -220,7 +221,12 @@ draw_toolbar(struct nk_context *ctx, vapor_app *app, int busy)
     nk_layout_row_template_begin(ctx, 30);
     nk_layout_row_template_push_static(ctx, 70);
     nk_layout_row_template_push_static(ctx, 170);
-    nk_layout_row_template_push_dynamic(ctx);
+    if (app->selected_id[0]) {
+        nk_layout_row_template_push_static(ctx, 80);
+        nk_layout_row_template_push_dynamic(ctx);
+    } else {
+        nk_layout_row_template_push_dynamic(ctx);
+    }
     nk_layout_row_template_push_static(ctx, 90);
     nk_layout_row_template_push_static(ctx, 90);
     nk_layout_row_template_end(ctx);
@@ -234,8 +240,15 @@ draw_toolbar(struct nk_context *ctx, vapor_app *app, int busy)
         nk_label_colored(ctx, who, NK_TEXT_LEFT, COL_MUTED_V);
     }
 
-    nk_edit_string(ctx, NK_EDIT_FIELD, app->search, &app->search_len,
-                   (int)sizeof(app->search) - 1, nk_filter_default);
+    if (app->selected_id[0]) {
+        if (nk_button_label(ctx, "Back")) {
+            app->selected_id[0] = '\0';
+        }
+        nk_spacing(ctx, 1);
+    } else {
+        nk_edit_string(ctx, NK_EDIT_FIELD, app->search, &app->search_len,
+                       (int)sizeof(app->search) - 1, nk_filter_default);
+    }
 
     if (busy) {
         nk_label_colored(ctx, "working", NK_TEXT_CENTERED, COL_MUTED_V);
@@ -295,6 +308,7 @@ draw_settings(struct nk_context *ctx, vapor_app *app, int busy)
         app->games = NULL;
         app->ngames = 0;
         app->catalog_loaded = 0;
+        app->selected_id[0] = '\0';
         vapor_gui_notice(app, 0, "signed out");
     }
     nk_layout_row_end(ctx);
@@ -370,11 +384,50 @@ matches_search(const vapor_app *app, const vapor_catalog_entry *e)
     return strstr(hay, needle) != NULL;
 }
 
+static int
+find_game(const vapor_app *app, const char *id)
+{
+    size_t i;
+
+    if (!id || !id[0]) {
+        return -1;
+    }
+    for (i = 0; i < app->ngames; i++) {
+        if (strcmp(app->games[i].id, id) == 0) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void
+open_details(vapor_app *app, const char *id)
+{
+    snprintf(app->selected_id, sizeof(app->selected_id), "%s", id);
+}
+
+static void
+rating_text(const vapor_catalog_entry *e, char *out, size_t outsz)
+{
+    if (e->steam_rating_label[0]) {
+        if (e->steam_rating_pct > 0) {
+            snprintf(out, outsz, "%s  %d%%", e->steam_rating_label,
+                     e->steam_rating_pct);
+        } else {
+            snprintf(out, outsz, "%s", e->steam_rating_label);
+        }
+    } else if (e->rating_votes > 0) {
+        snprintf(out, outsz, "%.1f / 5  (%d)", e->rating_avg, e->rating_votes);
+    } else {
+        out[0] = '\0';
+    }
+}
+
 static void
 draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
 {
     const vapor_catalog_entry *e = &app->games[index];
-    char            size[32], line[320];
+    char            size[32], line[320], rate[160];
     const char     *state;
     struct nk_color state_col;
     struct nk_image cover;
@@ -394,21 +447,32 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
         return;
     }
 
-    nk_layout_row_dynamic(ctx, 72, 1);
+    nk_layout_row_dynamic(ctx, COVER_H, 1);
     if (vapor_gui_cover_image(app, index, &cover)) {
         nk_image(ctx, cover);
     } else {
-        nk_label_colored(ctx, " ", NK_TEXT_CENTERED, COL_MUTED_V);
+        nk_label_colored(ctx, e->name, NK_TEXT_CENTERED, COL_MUTED_V);
+    }
+    if (nk_widget_is_mouse_clicked(ctx, NK_BUTTON_LEFT)) {
+        open_details(app, e->id);
     }
 
     nk_layout_row_dynamic(ctx, 22, 1);
     nk_label_colored(ctx, e->name, NK_TEXT_LEFT, COL_TEXT_V);
+    if (nk_widget_is_mouse_clicked(ctx, NK_BUTTON_LEFT)) {
+        open_details(app, e->id);
+    }
 
+    rating_text(e, rate, sizeof(rate));
     nk_layout_row_dynamic(ctx, 16, 1);
-    vapor_format_bytes(e->size, size, sizeof(size));
-    snprintf(line, sizeof(line), "%s   %s",
-             e->latest_version[0] ? e->latest_version : "-", size);
-    nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_MUTED_V);
+    if (rate[0]) {
+        nk_label_colored(ctx, rate, NK_TEXT_LEFT, COL_WARN_V);
+    } else {
+        vapor_format_bytes(e->size, size, sizeof(size));
+        snprintf(line, sizeof(line), "%s   %s",
+                 e->latest_version[0] ? e->latest_version : "-", size);
+        nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_MUTED_V);
+    }
 
     nk_layout_row_dynamic(ctx, 16, 1);
     if (e->update_available) {
@@ -434,39 +498,193 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
     nk_layout_row_dynamic(ctx, 8, 1);
     nk_spacing(ctx, 1);
 
-    /* Buttons are hidden rather than greyed while a job runs, which keeps the
-     * "one job at a time" rule obvious instead of looking broken. */
-    if (busy) {
-        nk_layout_row_dynamic(ctx, ROW_H, 1);
-        nk_spacing(ctx, 1);
-        nk_group_end(ctx);
-        nk_style_pop_float(ctx);
-        nk_style_pop_style_item(ctx);
-        return;
-    }
-
-    nk_layout_row_dynamic(ctx, ROW_H, e->installed ? 3 : 1);
-    if (e->installed) {
+    nk_layout_row_dynamic(ctx, ROW_H, 1);
+    if (!busy && e->installed) {
         if (nk_button_label(ctx, "Play")) {
             vapor_gui_start_launch(app, e->id);
         }
-        if (nk_button_label(ctx, e->update_available ? "Update" : "Verify")) {
-            if (e->update_available) {
-                vapor_gui_start_install(app, e->id, e->latest_version);
-            } else {
-                vapor_gui_start_verify(app, e->id);
-            }
-        }
-        if (nk_button_label(ctx, "Remove")) {
-            vapor_gui_start_uninstall(app, e->id);
-        }
-    } else if (nk_button_label(ctx, "Install")) {
-        vapor_gui_start_install(app, e->id, e->latest_version);
+    } else {
+        nk_spacing(ctx, 1);
     }
 
     nk_group_end(ctx);
     nk_style_pop_float(ctx);
     nk_style_pop_style_item(ctx);
+}
+
+static float
+desc_height(struct nk_context *ctx, const char *text)
+{
+    float width = nk_window_get_content_region_size(ctx).x;
+    float line = ctx->style.font->height + 4.0f;
+    int   cols, n, lines;
+
+    if (!text || !text[0]) {
+        return line * 2.0f;
+    }
+    cols = (int)(width / 7.5f);
+    if (cols < 24) {
+        cols = 24;
+    }
+    n = (int)strlen(text);
+    lines = (n + cols - 1) / cols;
+    if (lines < 3) {
+        lines = 3;
+    }
+    if (lines > 14) {
+        lines = 14;
+    }
+    return line * (float)lines;
+}
+
+static void
+draw_detail(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
+{
+    const vapor_catalog_entry *e = &app->games[index];
+    char            size[32], line[320], rate[160];
+    struct nk_image cover;
+    int             i;
+
+    nk_layout_row_template_begin(ctx, 280);
+    nk_layout_row_template_push_static(ctx, 200);
+    nk_layout_row_template_push_dynamic(ctx);
+    nk_layout_row_template_end(ctx);
+
+    nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
+                             nk_style_item_color(nk_rgb(41, 47, 57)));
+    if (nk_group_begin(ctx, "detail-art", NK_WINDOW_NO_SCROLLBAR)) {
+        nk_layout_row_dynamic(ctx, 260, 1);
+        if (vapor_gui_cover_image(app, index, &cover)) {
+            nk_image(ctx, cover);
+        } else {
+            nk_label_colored(ctx, "no cover", NK_TEXT_CENTERED, COL_MUTED_V);
+        }
+        nk_group_end(ctx);
+    }
+    nk_style_pop_style_item(ctx);
+
+    if (nk_group_begin(ctx, "detail-meta", 0)) {
+        nk_layout_row_dynamic(ctx, 28, 1);
+        nk_label_colored(ctx, e->name, NK_TEXT_LEFT, COL_TEXT_V);
+
+        nk_layout_row_dynamic(ctx, 18, 1);
+        nk_label_colored(ctx, e->developer[0] ? e->developer : e->id,
+                         NK_TEXT_LEFT, COL_MUTED_V);
+
+        rating_text(e, rate, sizeof(rate));
+        nk_layout_row_dynamic(ctx, 18, 1);
+        if (rate[0]) {
+            nk_label_colored(ctx, rate, NK_TEXT_LEFT, COL_WARN_V);
+        } else {
+            nk_label_colored(ctx, "no Steam rating yet", NK_TEXT_LEFT, COL_MUTED_V);
+        }
+
+        if (e->rating_votes > 0) {
+            snprintf(line, sizeof(line), "Vapor community  %.1f / 5  (%d)",
+                     e->rating_avg, e->rating_votes);
+            nk_layout_row_dynamic(ctx, 18, 1);
+            nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_GOOD_V);
+        }
+
+        vapor_format_bytes(e->size, size, sizeof(size));
+        snprintf(line, sizeof(line), "%s   %s",
+                 e->latest_version[0] ? e->latest_version : "-", size);
+        nk_layout_row_dynamic(ctx, 18, 1);
+        nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_MUTED_V);
+
+        nk_layout_row_dynamic(ctx, 18, 1);
+        if (e->update_available) {
+            snprintf(line, sizeof(line), "update available from %s",
+                     e->installed_version);
+            nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_WARN_V);
+        } else if (e->installed) {
+            if (e->play_seconds > 0) {
+                char played[64];
+                vapor_format_duration(e->play_seconds, played, sizeof(played));
+                snprintf(line, sizeof(line), "installed   %s played", played);
+                nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_GOOD_V);
+            } else {
+                nk_label_colored(ctx, "installed", NK_TEXT_LEFT, COL_GOOD_V);
+            }
+        } else {
+            nk_label_colored(ctx, "not installed", NK_TEXT_LEFT, COL_MUTED_V);
+        }
+
+        nk_layout_row_dynamic(ctx, 10, 1);
+        nk_spacing(ctx, 1);
+
+        nk_layout_row_begin(ctx, NK_STATIC, ROW_H, 6);
+        nk_layout_row_push(ctx, 88);
+        nk_label_colored(ctx, "Your rating", NK_TEXT_LEFT, COL_MUTED_V);
+        for (i = 1; i <= 5; i++) {
+            char lab[4];
+            int  mine = (e->my_rating == i);
+
+            snprintf(lab, sizeof(lab), "%d", i);
+            nk_layout_row_push(ctx, 36);
+            if (mine) {
+                nk_style_push_style_item(ctx, &ctx->style.button.normal,
+                                         nk_style_item_color(COL_WARN_V));
+                nk_style_push_style_item(ctx, &ctx->style.button.hover,
+                                         nk_style_item_color(COL_WARN_V));
+                nk_style_push_style_item(ctx, &ctx->style.button.active,
+                                         nk_style_item_color(COL_WARN_V));
+            }
+            if (busy) {
+                nk_label_colored(ctx, lab, NK_TEXT_CENTERED, COL_MUTED_V);
+            } else if (nk_button_label(ctx, lab)) {
+                vapor_gui_start_rate(app, e->id, i);
+            }
+            if (mine) {
+                nk_style_pop_style_item(ctx);
+                nk_style_pop_style_item(ctx);
+                nk_style_pop_style_item(ctx);
+            }
+        }
+        nk_layout_row_end(ctx);
+
+        nk_group_end(ctx);
+    }
+
+    nk_layout_row_dynamic(ctx, 18, 1);
+    nk_label_colored(ctx, "Description", NK_TEXT_LEFT, COL_MUTED_V);
+    nk_layout_row_dynamic(ctx, desc_height(ctx, e->description[0]
+                                               ? e->description
+                                               : "No description yet."), 1);
+    if (e->description[0]) {
+        nk_label_wrap(ctx, e->description);
+    } else {
+        nk_label_wrap(ctx,
+                      "No description yet. vapord fills this in from Steam when "
+                      "it can match the title.");
+    }
+
+    if (busy) {
+        nk_layout_row_dynamic(ctx, ROW_H, 1);
+        nk_spacing(ctx, 1);
+        return;
+    }
+
+    if (e->installed) {
+        nk_layout_row_dynamic(ctx, ROW_H, e->update_available ? 4 : 3);
+        if (nk_button_label(ctx, "Play")) {
+            vapor_gui_start_launch(app, e->id);
+        }
+        if (e->update_available && nk_button_label(ctx, "Update")) {
+            vapor_gui_start_install(app, e->id, e->latest_version);
+        }
+        if (nk_button_label(ctx, "Verify")) {
+            vapor_gui_start_verify(app, e->id);
+        }
+        if (nk_button_label(ctx, "Remove")) {
+            vapor_gui_start_uninstall(app, e->id);
+        }
+    } else {
+        nk_layout_row_dynamic(ctx, ROW_H, 1);
+        if (nk_button_label(ctx, "Install")) {
+            vapor_gui_start_install(app, e->id, e->latest_version);
+        }
+    }
 }
 
 void
@@ -491,39 +709,49 @@ vapor_gui_library_screen(struct nk_context *ctx, vapor_app *app, int w, int h)
     nk_end(ctx);
 
     if (nk_begin(ctx, "grid", nk_rect(0, hdr, (float)w, (float)h - hdr), 0)) {
-        /* Measured from the panel rather than the window, so the padding and
-         * the scrollbar are already accounted for. */
-        float avail = nk_window_get_content_region_size(ctx).x;
+        int sel = find_game(app, app->selected_id);
 
-        per_row = (int)(avail / CARD_W);
-        if (per_row < 1) {
-            per_row = 1;
+        if (app->selected_id[0] && sel < 0 && app->catalog_loaded) {
+            app->selected_id[0] = '\0';
         }
 
-        for (i = 0; i < app->ngames; i++) {
-            if (!matches_search(app, &app->games[i])) {
-                continue;
-            }
-            if (shown % per_row == 0) {
-                /* Cards share the row evenly instead of leaving a ragged gap
-                 * on the right. */
-                int item_w =
-                    (int)((avail - GAP * (float)(per_row - 1)) / (float)per_row);
-                nk_layout_row_static(ctx, CARD_H, item_w, per_row);
-            }
-            draw_card(ctx, app, i, busy);
-            shown++;
-        }
+        if (sel >= 0) {
+            draw_detail(ctx, app, (size_t)sel, busy);
+        } else {
+            /* Measured from the panel rather than the window, so the padding and
+             * the scrollbar are already accounted for. */
+            float avail = nk_window_get_content_region_size(ctx).x;
 
-        if (shown == 0) {
-            nk_layout_row_dynamic(ctx, 24, 1);
-            nk_label_colored(ctx,
-                             !app->catalog_loaded ? "Loading the catalog..."
-                             : app->ngames == 0
-                                 ? "The catalog is empty. Publish a game with "
-                                   "vapor-admin on the server."
-                                 : "Nothing matches that search.",
-                             NK_TEXT_LEFT, COL_MUTED_V);
+            per_row = (int)(avail / CARD_W);
+            if (per_row < 1) {
+                per_row = 1;
+            }
+
+            for (i = 0; i < app->ngames; i++) {
+                if (!matches_search(app, &app->games[i])) {
+                    continue;
+                }
+                if (shown % per_row == 0) {
+                    /* Cards share the row evenly instead of leaving a ragged gap
+                     * on the right. */
+                    int item_w =
+                        (int)((avail - GAP * (float)(per_row - 1)) / (float)per_row);
+                    nk_layout_row_static(ctx, CARD_H, item_w, per_row);
+                }
+                draw_card(ctx, app, i, busy);
+                shown++;
+            }
+
+            if (shown == 0) {
+                nk_layout_row_dynamic(ctx, 24, 1);
+                nk_label_colored(ctx,
+                                 !app->catalog_loaded ? "Loading the catalog..."
+                                 : app->ngames == 0
+                                     ? "The catalog is empty. Publish a game with "
+                                       "vapor-admin on the server."
+                                     : "Nothing matches that search.",
+                                 NK_TEXT_LEFT, COL_MUTED_V);
+            }
         }
     }
     nk_end(ctx);

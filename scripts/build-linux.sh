@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Configure and build on Linux. Pass extra CMake flags as arguments, e.g.
-#   scripts/build-linux.sh -DVAPOR_BUILD_GUI=ON
+# Configure and build on Linux. Extra CMake flags are passed through.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,18 +10,14 @@ if [ ! -f "${root}/third_party/sqlite/sqlite3.c" ]; then
     exit 1
 fi
 
-# The GUI needs SDL2 and OpenGL from the system, so it is built only when they
-# are actually present. An explicit -DVAPOR_BUILD_GUI on the command line wins.
-gui=OFF
-if pkg-config --exists sdl2 gl 2>/dev/null; then
-    gui=ON
+# The GUI is required: vapord's host window and vapor-gui both use SDL2.
+if ! pkg-config --exists sdl2 gl 2>/dev/null; then
+    echo "SDL2/OpenGL not found; run: sudo bash scripts/bootstrap-linux.sh" >&2
+    exit 1
 fi
-case " $* " in
-*" -DVAPOR_BUILD_GUI"*) gui="" ;;
-esac
 
 cmake -S "${root}" -B "${build}" -DCMAKE_BUILD_TYPE="${BUILD_TYPE:-Debug}" \
-      ${gui:+-DVAPOR_BUILD_GUI=${gui}} "$@"
+      -DVAPOR_BUILD_GUI=ON "$@"
 cmake --build "${build}" -j "$(nproc)"
 
 echo

@@ -12,8 +12,9 @@
 int vapor_wise_extract(const char *exe_path, const char *dest_dir, char *err,
                        size_t errsz);
 
-/* Drop CD-only leftovers (autorun, tiny HL.DAT stubs) so the tree looks like
- * a SETUP install instead of a copied disc. Safe to call more than once. */
+/* Drop CD leftovers so the tree looks like a SETUP install: autorun, and a
+ * tiny root *.DAT when a larger file of the same name exists in a subdirectory.
+ * Safe to call more than once. */
 void vapor_disc_finish_install(const char *dir);
 
 #endif /* VAPOR_WISE_H */

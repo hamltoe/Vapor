@@ -2,10 +2,10 @@
 # Installs everything Vapor needs to build on a Debian or Ubuntu machine.
 #
 # Only three things come from the package manager - libcurl for the client,
-# libsodium for the server, and SDL2 for the optional GUI. Everything else is
-# vendored under third_party/ by scripts/vendor-deps.sh.
+# libsodium for the server, and SDL2 for the host/client windows. Everything
+# else is vendored under third_party/ by scripts/vendor-deps.sh.
 #
-# Usage: scripts/bootstrap-linux.sh [--no-gui] [--server-only] [--client-only]
+# Usage: scripts/bootstrap-linux.sh [--server-only] [--client-only]
 set -euo pipefail
 
 want_gui=1
@@ -14,8 +14,7 @@ want_client=1
 
 for arg in "$@"; do
     case "${arg}" in
-    --no-gui)      want_gui=0 ;;
-    --server-only) want_client=0; want_gui=0 ;;
+    --server-only) want_client=0 ;;
     --client-only) want_server=0 ;;
     -h|--help)
         sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'

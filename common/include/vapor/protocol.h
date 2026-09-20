@@ -21,6 +21,10 @@
  * server cannot make it allocate without bound. */
 #define VAPOR_MAX_COVER_BYTES (4 * 1024 * 1024)
 
+/* Catalog blurb. Steam short_description fits comfortably; longer about-text
+ * is truncated rather than rejected. */
+#define VAPOR_DESC_MAX 2048
+
 /* Opaque bearer tokens: 32 random bytes, hex on the wire, stored server-side
  * as a SHA-256 so a database leak does not yield usable sessions. */
 #define VAPOR_TOKEN_BYTES       32

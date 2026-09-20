@@ -13,6 +13,15 @@
 #include "miniz.h"
 #include "vapor/util.h"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <dirent.h>
+#endif
+
 #define WISE_MAX_SCRIPT (8u * 1024u * 1024u)
 #define WISE_MAX_FILE (512u * 1024u * 1024u)
 #define WISE_MAX_FILES 4096
@@ -619,48 +628,210 @@ unlink_if_exists(const char *path)
     remove(path);
 }
 
+static int
+is_dot_or_hidden(const char *name)
+{
+    return !name || name[0] == '.';
+}
+
+#if defined(_WIN32)
+static int
+file_len(const char *path, long *out)
+{
+    FILE *f;
+    long  n;
+
+    f = fopen(path, "rb");
+    if (!f) {
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
+    }
+    n = ftell(f);
+    fclose(f);
+    if (n < 0) {
+        return -1;
+    }
+    *out = n;
+    return 0;
+}
+#endif
+
+static int
+has_larger_namesake(const char *dir, const char *want, long stub_size, int depth)
+{
+    if (!dir || !*dir || !want || !*want || depth > 24) {
+        return 0;
+    }
+#if defined(_WIN32)
+    {
+        char            pattern[1024];
+        WIN32_FIND_DATAA fd;
+        HANDLE           h;
+
+        if (snprintf(pattern, sizeof(pattern), "%s/*", dir) >= (int)sizeof(pattern)) {
+            return 0;
+        }
+        h = FindFirstFileA(pattern, &fd);
+        if (h == INVALID_HANDLE_VALUE) {
+            return 0;
+        }
+        do {
+            char child[1024];
+
+            if (is_dot_or_hidden(fd.cFileName)) {
+                continue;
+            }
+            if (snprintf(child, sizeof(child), "%s/%s", dir, fd.cFileName)
+                >= (int)sizeof(child)) {
+                continue;
+            }
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (has_larger_namesake(child, want, stub_size, depth + 1)) {
+                    FindClose(h);
+                    return 1;
+                }
+            } else if (depth > 0 && vapor_str_eq_ci(fd.cFileName, want)) {
+                ULONGLONG sz = ((ULONGLONG)fd.nFileSizeHigh << 32)
+                    | fd.nFileSizeLow;
+                if (sz > (ULONGLONG)stub_size) {
+                    FindClose(h);
+                    return 1;
+                }
+            }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+#else
+    {
+        DIR           *d;
+        struct dirent *ent;
+
+        d = opendir(dir);
+        if (!d) {
+            return 0;
+        }
+        while ((ent = readdir(d)) != NULL) {
+            char        child[1024];
+            struct stat st;
+
+            if (is_dot_or_hidden(ent->d_name)) {
+                continue;
+            }
+            if (snprintf(child, sizeof(child), "%s/%s", dir, ent->d_name)
+                >= (int)sizeof(child)) {
+                continue;
+            }
+            if (lstat(child, &st) != 0) {
+                continue;
+            }
+            if (S_ISDIR(st.st_mode)) {
+                if (has_larger_namesake(child, want, stub_size, depth + 1)) {
+                    closedir(d);
+                    return 1;
+                }
+            } else if (depth > 0 && S_ISREG(st.st_mode)
+                       && vapor_str_eq_ci(ent->d_name, want)
+                       && (long)st.st_size > stub_size) {
+                closedir(d);
+                return 1;
+            }
+        }
+        closedir(d);
+    }
+#endif
+    return 0;
+}
+
 void
 vapor_disc_finish_install(const char *dir)
 {
-    static const char *const drop[] = {
-        "AUTORUN.EXE", "AUTORUN.INF", "autorun.exe", "autorun.inf",
-        "SIERRA.URL", "sierra.url", NULL
-    };
-    static const char *const stub_dat[] = {
-        "HL.DAT", "hl.dat", "halflife.dat", "HLDS.DAT", "hlds.dat", NULL
-    };
-    size_t i;
-
     if (!dir || !*dir) {
         return;
     }
-    for (i = 0; drop[i]; i++) {
-        char path[1024];
-        if (snprintf(path, sizeof(path), "%s/%s", dir, drop[i]) < (int)sizeof(path)) {
-            unlink_if_exists(path);
-        }
-    }
-    for (i = 0; stub_dat[i]; i++) {
-        char path[1024];
-        FILE *f;
-        long  n;
+#if defined(_WIN32)
+    {
+        char            pattern[1024];
+        WIN32_FIND_DATAA fd;
+        HANDLE           h;
 
-        if (snprintf(path, sizeof(path), "%s/%s", dir, stub_dat[i])
-            >= (int)sizeof(path)) {
-            continue;
+        if (snprintf(pattern, sizeof(pattern), "%s/*", dir) >= (int)sizeof(pattern)) {
+            return;
         }
-        f = fopen(path, "rb");
-        if (!f) {
-            continue;
+        h = FindFirstFileA(pattern, &fd);
+        if (h == INVALID_HANDLE_VALUE) {
+            return;
         }
-        if (fseek(f, 0, SEEK_END) != 0) {
-            fclose(f);
-            continue;
-        }
-        n = ftell(f);
-        fclose(f);
-        if (n >= 0 && n < 64) {
-            unlink_if_exists(path);
-        }
+        do {
+            char path[1024];
+            long n;
+
+            if (is_dot_or_hidden(fd.cFileName)
+                || (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                continue;
+            }
+            if (snprintf(path, sizeof(path), "%s/%s", dir, fd.cFileName)
+                >= (int)sizeof(path)) {
+                continue;
+            }
+            if (vapor_str_eq_ci(fd.cFileName, "autorun.exe")
+                || vapor_str_eq_ci(fd.cFileName, "autorun.inf")) {
+                unlink_if_exists(path);
+                continue;
+            }
+            if (!vapor_str_ends_with_ci(fd.cFileName, ".dat")) {
+                continue;
+            }
+            n = 0;
+            if (file_len(path, &n) != 0 || n >= 64) {
+                continue;
+            }
+            if (has_larger_namesake(dir, fd.cFileName, n, 0)) {
+                unlink_if_exists(path);
+            }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
     }
+#else
+    {
+        DIR           *d;
+        struct dirent *ent;
+
+        d = opendir(dir);
+        if (!d) {
+            return;
+        }
+        while ((ent = readdir(d)) != NULL) {
+            char        path[1024];
+            struct stat st;
+            long        n;
+
+            if (is_dot_or_hidden(ent->d_name)) {
+                continue;
+            }
+            if (snprintf(path, sizeof(path), "%s/%s", dir, ent->d_name)
+                >= (int)sizeof(path)) {
+                continue;
+            }
+            if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+                continue;
+            }
+            if (vapor_str_eq_ci(ent->d_name, "autorun.exe")
+                || vapor_str_eq_ci(ent->d_name, "autorun.inf")) {
+                unlink_if_exists(path);
+                continue;
+            }
+            if (!vapor_str_ends_with_ci(ent->d_name, ".dat") || st.st_size >= 64) {
+                continue;
+            }
+            n = (long)st.st_size;
+            if (has_larger_namesake(dir, ent->d_name, n, 0)) {
+                unlink_if_exists(path);
+            }
+        }
+        closedir(d);
+    }
+#endif
 }

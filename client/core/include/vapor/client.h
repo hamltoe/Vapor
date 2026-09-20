@@ -65,6 +65,8 @@ int vapor_api_get(vapor_client *vc, const char *path, int auth,
                   vapor_response *out);
 int vapor_api_post(vapor_client *vc, const char *path, const char *json_body,
                    int auth, vapor_response *out);
+int vapor_api_put(vapor_client *vc, const char *path, const char *json_body,
+                  int auth, vapor_response *out);
 
 /* Return non-zero to abort the transfer. */
 typedef int (*vapor_progress_fn)(void *ud, uint64_t done, uint64_t total);
@@ -108,7 +110,7 @@ typedef struct {
     char     name[256];
     char     latest_version[VAPOR_VERSION_MAX + 1];
     char     developer[128];
-    char     description[512];
+    char     description[VAPOR_DESC_MAX];
     uint64_t size;             /* of the latest version's package */
     /* Merged in from the local database so one call answers both "what does
      * the server have" and "what do I have". */
@@ -117,6 +119,12 @@ typedef struct {
     int      update_available;
     int64_t  play_seconds;
     int      has_cover;
+    double   rating_avg;       /* local community average, 0 if no votes */
+    int      rating_votes;
+    int      my_rating;        /* 1-5, or 0 if this account has not rated */
+    int      steam_rating_pct; /* 0 if unknown */
+    int      steam_rating_count;
+    char     steam_rating_label[48];
 } vapor_catalog_entry;
 
 /* Caller frees *out. */
@@ -138,6 +146,16 @@ typedef struct {
 int  vapor_game_fetch(vapor_client *vc, const char *game_id,
                       vapor_game_detail *out);
 void vapor_game_detail_free(vapor_game_detail *d);
+
+typedef struct {
+    int    my_rating;
+    double rating_avg;
+    int    rating_votes;
+} vapor_rating;
+
+/* `score` is 1-5. On success fills `out` when non-NULL. */
+int vapor_game_rate(vapor_client *vc, const char *game_id, int score,
+                    vapor_rating *out);
 
 /* ---------------------------------------------------------------- local db */
 typedef struct {

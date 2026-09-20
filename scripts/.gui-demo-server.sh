@@ -34,7 +34,7 @@ start)
     # A second version, so the GUI has an update to offer.
     publish hollow-vale   "Hollow Vale"      1.0.10 "Smoke Works"   "A quiet descent into a flooded valley."   1
 
-    setsid "${bin}/vapord" -p "${port}" -H 0.0.0.0 \
+    setsid "${bin}/vapord" --headless -p "${port}" -H 0.0.0.0 \
         -r "${work}/content" -d "${work}/vapor.db" \
         > "${work}/vapord.log" 2>&1 &
     echo $! > "${work}/vapord.pid"

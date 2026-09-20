@@ -495,8 +495,7 @@ is_junk_exec(const char *base)
         "setup.exe", "install.exe", "installer.exe", "unins000.exe",
         "uninstall.exe", "dxsetup.exe", "autorun.exe", "vcredist", "vc_redist",
         "unitycrashhandler", "crashreporter", "easyanticheat",
-        "dotnetfx", "hlds.exe", "hltv.exe", "upd.exe", "sierraup.exe",
-        "opforup.exe", "voice_tweak.exe", "qfiles.exe", NULL
+        "dotnetfx", NULL
     };
     size_t i;
 
@@ -510,7 +509,9 @@ is_junk_exec(const char *base)
         && vapor_str_ends_with_ci(base, ".exe")) {
         return 1;
     }
-    if (vapor_str_ends_with_ci(base, "update.exe")) {
+    if (vapor_str_eq_ci(base, "upd.exe")
+        || vapor_str_ends_with_ci(base, "up.exe")
+        || vapor_str_ends_with_ci(base, "update.exe")) {
         return 1;
     }
     return 0;

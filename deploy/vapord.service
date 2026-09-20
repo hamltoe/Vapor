@@ -7,7 +7,7 @@ Documentation=file:///opt/vapor/Docs/operations.md
 Type=simple
 User=vapor
 Group=vapor
-ExecStart=/usr/local/bin/vapord -c /etc/vapor/vapord.conf
+ExecStart=/usr/local/bin/vapord --headless -c /etc/vapor/vapord.conf
 Restart=on-failure
 RestartSec=2
 # vapord speaks plain HTTP; TLS belongs on the reverse proxy in front of it.

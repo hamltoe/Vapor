@@ -10,7 +10,7 @@ trap 'kill $pid 2>/dev/null; rm -rf "$work"' EXIT
 export XDG_DATA_HOME="${work}/cd" HOME="${work}/home"
 mkdir -p "$XDG_DATA_HOME" "$HOME"
 
-"${bin}/vapord" -p $port -r "${work}/content" -d "${work}/v.db" > "${work}/log" 2>&1 &
+"${bin}/vapord" --headless -p $port -r "${work}/content" -d "${work}/v.db" > "${work}/log" 2>&1 &
 pid=$!
 for _ in $(seq 1 50); do grep -q listening "${work}/log" && break; sleep 0.1; done
 

@@ -42,6 +42,9 @@ int  vapord_config_load(vapord_config *c, const char *path,
                         char *err, size_t errsz);
 void vapord_config_print(const vapord_config *c);
 
+/* Extra log sink for the host window. stderr is still written. */
+void vapord_set_log_sink(void (*fn)(const char *line, void *ud), void *ud);
+
 /* ---------------------------------------------------------------------- db */
 int  vapord_db_open(vapord *app, char *err, size_t errsz);
 void vapord_db_close(vapord *app);
@@ -53,6 +56,10 @@ int vapord_user_lookup(sqlite3 *db, const char *username, int64_t *out_id,
 int vapord_user_name(sqlite3 *db, int64_t user_id, char *out, size_t outsz,
                      int *is_admin, int64_t *created_at);
 int vapord_user_count(sqlite3 *db, int64_t *out);
+int vapord_game_count(sqlite3 *db, int64_t *out);
+/* Copies up to `cap` catalog titles (NUL-terminated, each `namesz` bytes). */
+int vapord_game_titles(sqlite3 *db, char *names, size_t namesz, size_t cap,
+                       size_t *out_n);
 
 int vapord_token_store(sqlite3 *db, const char *token_hash, int64_t user_id,
                        int64_t created_at, int64_t expires_at);
@@ -101,9 +108,35 @@ int vapord_version_manifest(sqlite3 *db, const char *game_id,
 int vapord_version_cover(sqlite3 *db, const char *game_id, const char *version,
                          char *out, size_t outsz);
 
-/* Catalog rendering. Both return a new cJSON the caller owns, or NULL. */
-cJSON *vapord_catalog_json(sqlite3 *db);
-cJSON *vapord_game_json(sqlite3 *db, const char *game_id);
+int vapord_game_meta_row(sqlite3 *db, const char *game_id,
+                         char *developer, size_t devsz,
+                         char *description, size_t descsz,
+                         int *steam_appid, int64_t *fetched_at);
+int vapord_game_set_meta(sqlite3 *db, const char *game_id,
+                         const char *developer, const char *description,
+                         int steam_appid, int rating_pct, int rating_count,
+                         const char *rating_label);
+/* Records that a Steam lookup was attempted, even when it found nothing. */
+int vapord_game_touch_meta(sqlite3 *db, const char *game_id);
+int vapord_version_set_cover(sqlite3 *db, const char *game_id,
+                             const char *version, const char *cover);
+
+int vapord_rating_set(sqlite3 *db, int64_t user_id, const char *game_id,
+                      int score);
+int vapord_rating_summary(sqlite3 *db, const char *game_id, int64_t user_id,
+                          double *avg, int *votes, int *mine);
+
+/* Catalog rendering. Both return a new cJSON the caller owns, or NULL.
+ * `user_id` of 0 omits `my_rating`. */
+cJSON *vapord_catalog_json(sqlite3 *db, int64_t user_id);
+cJSON *vapord_game_json(sqlite3 *db, const char *game_id, int64_t user_id);
+
+/* Steam store lookup: cover, description, developer, community score.
+ * `hint_appid` comes from vapor.json (0 means search by name). `force`
+ * ignores the fetch cache. Returns 1 if the network was used, 0 if skipped. */
+int vapord_meta_enrich(vapord *app, const char *game_id, const char *name,
+                       const char *version, int hint_appid, int force);
+int vapord_meta_enrich_all(vapord *app, int force);
 
 /* -------------------------------------------------------------------- auth */
 int  vapord_auth_init(char *err, size_t errsz);
@@ -166,10 +199,14 @@ int vapord_library_resolve(const vapord_config *cfg, const char *rel,
  * fingerprint compare so multi-gigabyte archives are not re-hashed.
  * Zip files in the drop folder are served in place. ISO files are unpacked
  * (and a bundled Wise SETUP.EXE is unpacked too) and the files are zipped
- * under content_root; the original disc image is left alone. CD-only leftovers
- * such as autorun and tiny HL.DAT stubs are stripped so the tree matches a
- * SETUP install. */
+ * under content_root; the original disc image is left alone. CD leftovers
+ * (autorun, and a tiny root *.DAT that has a larger namesake below) are
+ * stripped so the tree matches a SETUP install. */
 int vapord_discover(vapord *app);
+
+/* Host window (SDL + Nuklear). Closing it stops the server. Returns 0 after
+ * a clean quit, or -1 if a display could not be opened. */
+int vapord_gui_run(vapord *app, volatile int *stop);
 
 /* --------------------------------------------------------------------- log */
 void vapord_log(const char *level, const char *fmt, ...);

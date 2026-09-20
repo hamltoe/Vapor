@@ -60,6 +60,18 @@ static const char *const MIGRATIONS[] = {
     "  version     TEXT NOT NULL,"
     "  updated_at  INTEGER NOT NULL"
     ")",
+    "ALTER TABLE games ADD COLUMN steam_appid INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE games ADD COLUMN steam_rating_pct INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE games ADD COLUMN steam_rating_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE games ADD COLUMN steam_rating_label TEXT",
+    "ALTER TABLE games ADD COLUMN metadata_fetched_at INTEGER NOT NULL DEFAULT 0",
+    "CREATE TABLE IF NOT EXISTS ratings ("
+    "  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"
+    "  game_id    TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,"
+    "  score      INTEGER NOT NULL,"
+    "  created_at INTEGER NOT NULL,"
+    "  PRIMARY KEY (user_id, game_id)"
+    ")",
 };
 
 int
@@ -217,6 +229,56 @@ vapord_user_count(sqlite3 *db, int64_t *out)
     return rc == SQLITE_ROW ? 0 : -1;
 }
 
+int
+vapord_game_count(sqlite3 *db, int64_t *out)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    *out = 0;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM games", -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    rc = sqlite3_step(st);
+    if (rc == SQLITE_ROW) {
+        *out = sqlite3_column_int64(st, 0);
+    }
+    sqlite3_finalize(st);
+    return rc == SQLITE_ROW ? 0 : -1;
+}
+
+int
+vapord_game_titles(sqlite3 *db, char *names, size_t namesz, size_t cap,
+                   size_t *out_n)
+{
+    sqlite3_stmt *st = NULL;
+    size_t        n = 0;
+
+    if (out_n) {
+        *out_n = 0;
+    }
+    if (!names || namesz < 2 || cap == 0) {
+        return -1;
+    }
+    if (sqlite3_prepare_v2(db,
+                           "SELECT name FROM games ORDER BY name COLLATE NOCASE",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    while (n < cap && sqlite3_step(st) == SQLITE_ROW) {
+        const char *name = (const char *)sqlite3_column_text(st, 0);
+        snprintf(names + n * namesz, namesz, "%s", name ? name : "");
+        n++;
+    }
+    sqlite3_finalize(st);
+    if (out_n) {
+        *out_n = n;
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------------ tokens */
 
 int
@@ -366,6 +428,229 @@ vapord_version_upsert(sqlite3 *db, const vapor_manifest *m,
     rc = sqlite3_step(st);
     sqlite3_finalize(st);
     return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_game_meta_row(sqlite3 *db, const char *game_id,
+                     char *developer, size_t devsz,
+                     char *description, size_t descsz,
+                     int *steam_appid, int64_t *fetched_at)
+{
+    sqlite3_stmt *st = NULL;
+    int           found = 0;
+
+    if (developer && devsz) {
+        developer[0] = '\0';
+    }
+    if (description && descsz) {
+        description[0] = '\0';
+    }
+    if (steam_appid) {
+        *steam_appid = 0;
+    }
+    if (fetched_at) {
+        *fetched_at = 0;
+    }
+
+    if (sqlite3_prepare_v2(db,
+                           "SELECT developer, description, steam_appid,"
+                           "       metadata_fetched_at FROM games WHERE id = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *dev  = (const char *)sqlite3_column_text(st, 0);
+        const char *desc = (const char *)sqlite3_column_text(st, 1);
+
+        if (developer && devsz && dev) {
+            snprintf(developer, devsz, "%s", dev);
+        }
+        if (description && descsz && desc) {
+            snprintf(description, descsz, "%s", desc);
+        }
+        if (steam_appid) {
+            *steam_appid = sqlite3_column_int(st, 2);
+        }
+        if (fetched_at) {
+            *fetched_at = sqlite3_column_int64(st, 3);
+        }
+        found = 1;
+    }
+    sqlite3_finalize(st);
+    return found ? 0 : 1;
+}
+
+int
+vapord_game_set_meta(sqlite3 *db, const char *game_id,
+                     const char *developer, const char *description,
+                     int steam_appid, int rating_pct, int rating_count,
+                     const char *rating_label)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (sqlite3_prepare_v2(db,
+                           "UPDATE games SET"
+                           "  developer = CASE WHEN ?2 != '' THEN ?2 ELSE developer END,"
+                           "  description = CASE WHEN ?3 != '' THEN ?3 ELSE description END,"
+                           "  steam_appid = CASE WHEN ?4 > 0 THEN ?4 ELSE steam_appid END,"
+                           "  steam_rating_pct = CASE WHEN ?5 >= 0 THEN ?5 ELSE steam_rating_pct END,"
+                           "  steam_rating_count = CASE WHEN ?6 >= 0 THEN ?6 ELSE steam_rating_count END,"
+                           "  steam_rating_label = CASE WHEN ?7 != '' THEN ?7 ELSE steam_rating_label END,"
+                           "  metadata_fetched_at = ?8"
+                           " WHERE id = ?1",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, developer ? developer : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, description ? description : "", -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 4, steam_appid);
+    sqlite3_bind_int(st, 5, rating_pct);
+    sqlite3_bind_int(st, 6, rating_count);
+    sqlite3_bind_text(st, 7, rating_label ? rating_label : "", -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 8, vapor_now_unix());
+
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_game_touch_meta(sqlite3 *db, const char *game_id)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (sqlite3_prepare_v2(db,
+                           "UPDATE games SET metadata_fetched_at = ? WHERE id = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_int64(st, 1, vapor_now_unix());
+    sqlite3_bind_text(st, 2, game_id, -1, SQLITE_STATIC);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_version_set_cover(sqlite3 *db, const char *game_id,
+                         const char *version, const char *cover)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (!cover || !*cover) {
+        return -1;
+    }
+    if (sqlite3_prepare_v2(db,
+                           "UPDATE versions SET cover = ? WHERE game_id = ? AND version = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, cover, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, version, -1, SQLITE_STATIC);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_rating_set(sqlite3 *db, int64_t user_id, const char *game_id, int score)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc, exists = 0;
+
+    if (score < 1 || score > 5 || !game_id || !*game_id) {
+        return -1;
+    }
+
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM games WHERE id = ?", -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    exists = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    if (!exists) {
+        return 1;
+    }
+
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO ratings (user_id, game_id, score, created_at)"
+                           " VALUES (?, ?, ?, ?)"
+                           " ON CONFLICT(user_id, game_id) DO UPDATE SET"
+                           "   score = excluded.score,"
+                           "   created_at = excluded.created_at",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_int64(st, 1, user_id);
+    sqlite3_bind_text(st, 2, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 3, score);
+    sqlite3_bind_int64(st, 4, vapor_now_unix());
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_rating_summary(sqlite3 *db, const char *game_id, int64_t user_id,
+                      double *avg, int *votes, int *mine)
+{
+    sqlite3_stmt *st = NULL;
+
+    if (avg) {
+        *avg = 0;
+    }
+    if (votes) {
+        *votes = 0;
+    }
+    if (mine) {
+        *mine = 0;
+    }
+
+    if (sqlite3_prepare_v2(db,
+                           "SELECT AVG(score), COUNT(*) FROM ratings WHERE game_id = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        if (avg && sqlite3_column_type(st, 0) != SQLITE_NULL) {
+            *avg = sqlite3_column_double(st, 0);
+        }
+        if (votes) {
+            *votes = sqlite3_column_int(st, 1);
+        }
+    }
+    sqlite3_finalize(st);
+
+    if (user_id > 0 && mine) {
+        if (sqlite3_prepare_v2(db,
+                               "SELECT score FROM ratings"
+                               " WHERE game_id = ? AND user_id = ?",
+                               -1, &st, NULL)
+            != SQLITE_OK) {
+            return -1;
+        }
+        sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(st, 2, user_id);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            *mine = sqlite3_column_int(st, 0);
+        }
+        sqlite3_finalize(st);
+    }
+    return 0;
 }
 
 int
@@ -763,8 +1048,48 @@ add_version_details(sqlite3 *db, const char *game_id, const char *version,
     sqlite3_finalize(st);
 }
 
+static void
+add_community_fields(sqlite3 *db, const char *game_id, int64_t user_id,
+                     cJSON *dst)
+{
+    sqlite3_stmt *st = NULL;
+    double        avg = 0;
+    int           votes = 0, mine = 0;
+    int           pct = 0, count = 0;
+    const char   *label = "";
+
+    (void)vapord_rating_summary(db, game_id, user_id, &avg, &votes, &mine);
+    cJSON_AddNumberToObject(dst, "rating_avg", votes > 0 ? avg : 0);
+    cJSON_AddNumberToObject(dst, "rating_votes", votes);
+    cJSON_AddNumberToObject(dst, "my_rating", mine);
+
+    if (sqlite3_prepare_v2(db,
+                           "SELECT steam_rating_pct, steam_rating_count,"
+                           "       steam_rating_label FROM games WHERE id = ?",
+                           -1, &st, NULL)
+        == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *s = (const char *)sqlite3_column_text(st, 2);
+            pct = sqlite3_column_int(st, 0);
+            count = sqlite3_column_int(st, 1);
+            if (s && *s) {
+                label = s;
+            }
+        }
+        cJSON_AddNumberToObject(dst, "steam_rating_pct", pct);
+        cJSON_AddNumberToObject(dst, "steam_rating_count", count);
+        cJSON_AddStringToObject(dst, "steam_rating_label", label);
+        sqlite3_finalize(st);
+    } else {
+        cJSON_AddNumberToObject(dst, "steam_rating_pct", 0);
+        cJSON_AddNumberToObject(dst, "steam_rating_count", 0);
+        cJSON_AddStringToObject(dst, "steam_rating_label", "");
+    }
+}
+
 cJSON *
-vapord_catalog_json(sqlite3 *db)
+vapord_catalog_json(sqlite3 *db, int64_t user_id)
 {
     sqlite3_stmt *st = NULL;
     cJSON        *root, *games;
@@ -814,13 +1139,14 @@ vapord_catalog_json(sqlite3 *db)
         cJSON_AddStringToObject(g, "description", desc ? desc : "");
         cJSON_AddStringToObject(g, "latest_version", latest);
         add_version_details(db, id, latest, g);
+        add_community_fields(db, id, user_id, g);
     }
     sqlite3_finalize(st);
     return root;
 }
 
 cJSON *
-vapord_game_json(sqlite3 *db, const char *game_id)
+vapord_game_json(sqlite3 *db, const char *game_id, int64_t user_id)
 {
     sqlite3_stmt *st = NULL;
     cJSON        *root = NULL, *versions;
@@ -854,7 +1180,9 @@ vapord_game_json(sqlite3 *db, const char *game_id)
 
     if (vapord_game_latest_version(db, game_id, latest, sizeof(latest)) == 0) {
         cJSON_AddStringToObject(root, "latest_version", latest);
+        add_version_details(db, game_id, latest, root);
     }
+    add_community_fields(db, game_id, user_id, root);
 
     versions = cJSON_AddArrayToObject(root, "versions");
     st = NULL;

@@ -1,13 +1,13 @@
 # Architecture
 
-Three binaries plus one shared client library. The server is Linux-only.
-The client is the same C11 code on Windows and Linux; only the platform
-layer and HTTP transport differ.
+Three binaries plus one shared client library. The server is Linux-only
+and always opens a host window (pass `--headless` for tests/systemd).
+The player client is `vapor-gui`; the `vapor` CLI is for scripts.
 
 ```
-                    Linux host (static IP)
+                    Linux host (static IP, a monitor)
   ┌─────────────────────────────────────────────────┐
-  │  Caddy :443  ──►  vapord :8777                  │
+  │  vapord window + HTTP :8777                     │
   │                     │                           │
   │                     ├── SQLite  users, tokens,  │
   │                     │           games, versions │
@@ -20,14 +20,14 @@ layer and HTTP transport differ.
   │                             package.zip         │
   │                             manifest.json       │
   │                             cover.png           │
-  │  vapor-admin ──► same SQLite, library, content  │
+  │  vapor-admin (optional ingest CLI)              │
   └─────────────────────────────────────────────────┘
                          ▲
             HTTPS JSON + ranged GET
                          │
   ┌─────────────────────────────────────────────────┐
   │  Player PC (Windows or Linux)                   │
-  │    vapor / vapor-gui                            │
+  │    vapor-gui                                    │
   │      └── libvapor                               │
   │            ├── local SQLite (installs)          │
   │            └── library directory (extracted)    │
@@ -38,10 +38,10 @@ layer and HTTP transport differ.
 
 | Binary | Links | Role |
 | --- | --- | --- |
-| `vapord` | civetweb, libsodium, SQLite, cJSON | HTTP API |
+| `vapord` | civetweb, libsodium, SQLite, SDL2, Nuklear | Host window + HTTP API |
 | `vapor-admin` | same server core, no HTTP | Ingest a game folder |
-| `vapor` | libvapor | CLI frontend |
-| `vapor-gui` | libvapor, Nuklear, SDL2, stb_image | GUI frontend |
+| `vapor` | libvapor | CLI frontend (scripts/tests) |
+| `vapor-gui` | libvapor, Nuklear, SDL2, stb_image | Player GUI |
 | `vapor-selftest` | common only | SHA-256, versions, manifests |
 
 `vapor-admin` reuses `vapord_core` (config, database, auth helpers, content
@@ -67,6 +67,7 @@ are vendored into `third_party/` and are not committed; run
 | Archives | miniz | Zip only for the prototype. |
 | GUI | Nuklear + SDL2 + OpenGL 2 | Immediate mode; worker thread owns `libvapor` during jobs. |
 | Cover decode | stb_image | PNG and JPEG only. |
+| Store metadata | libcurl (server) | Steam store search, appdetails, reviews; optional. |
 
 TLS is not compiled into vapord. Put Caddy (or another reverse proxy) in
 front of it, or pin a self-signed certificate in the Linux client. See
@@ -119,7 +120,7 @@ db_path      = /var/lib/vapor/vapor.db
 
 `library_root` is the drop folder vapord scans. Each immediate
 subdirectory is one game. Discovery runs at startup and then every
-`discover_interval` seconds (default 60; 0 means once). Unchanged
+`discover_interval` seconds (default 3600; 0 means once). Unchanged
 folders are fingerprint-skipped so large archives are not re-hashed.
 
 Zip files already sitting in `library_root` are served in place.
@@ -127,7 +128,10 @@ ISO files are unpacked (ISO 9660 / Joliet). A Wise `SETUP.EXE` on the disc
 is unpacked too, and the files are zipped into
 `<content_root>/<game_id>/<version>/package.zip`; the original disc image
 is left in the drop folder. Folders of loose files are zipped into the
-same content path. Every path segment is validated
+same content path. Disc leftovers are stripped by heuristic: autorun
+files, and a tiny root `*.DAT` only when a larger namesake exists below.
+Updaters (`upd.exe`, `*up.exe`, `*update.exe`) are not chosen as the
+launch target. Every path segment is validated
 so a hostile id or version cannot walk out of the root.
 
 Accounts live only in the server SQLite `users` table (username, Argon2id
@@ -149,7 +153,7 @@ sees the array being replaced underneath it.
 ```
 CMakeLists.txt
 common/                 shared by client and server
-server/src/             vapord
+server/src/             vapord (HTTP, discovery, host window in gui.c)
 server/tools/           vapor-admin
 client/core/            libvapor
 client/cli/             vapor

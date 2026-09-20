@@ -129,6 +129,15 @@ vapor_api_post(vapor_client *vc, const char *path, const char *json_body,
 }
 
 int
+vapor_api_put(vapor_client *vc, const char *path, const char *json_body,
+              int auth, vapor_response *out)
+{
+    return finish_api_call(vc, out,
+                           vapor_http_request(vc, "PUT", path, json_body, auth,
+                                              out));
+}
+
+int
 vapor_http_download(vapor_client *vc, const char *path, const char *dest_path,
                     vapor_progress_fn cb, void *ud)
 {

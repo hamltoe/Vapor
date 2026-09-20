@@ -80,8 +80,9 @@ vapord_route_catalog(vapord *app, struct mg_connection *c, const char *method,
     char        version[VAPOR_VERSION_MAX + 1];
     size_t      n;
 
-    if (strcmp(method, "GET") != 0) {
-        return vapord_send_errorf(c, 405, VAPOR_ERR_BAD_REQUEST, "use GET");
+    if (strcmp(method, "GET") != 0 && strcmp(method, "PUT") != 0) {
+        return vapord_send_errorf(c, 405, VAPOR_ERR_BAD_REQUEST,
+                                  "use GET or PUT");
     }
     if (!vapord_require_user(app, c, &user_id)) {
         return 401;
@@ -89,7 +90,12 @@ vapord_route_catalog(vapord *app, struct mg_connection *c, const char *method,
 
     /* GET /games -> whole catalog */
     if (strcmp(tail, "/games") == 0 || strcmp(tail, "/games/") == 0) {
-        cJSON *out = vapord_catalog_json(app->db);
+        cJSON *out;
+
+        if (strcmp(method, "GET") != 0) {
+            return vapord_send_errorf(c, 405, VAPOR_ERR_BAD_REQUEST, "use GET");
+        }
+        out = vapord_catalog_json(app->db, user_id);
         if (!out) {
             return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL,
                                       "could not build catalog");
@@ -116,12 +122,71 @@ vapord_route_catalog(vapord *app, struct mg_connection *c, const char *method,
 
     /* GET /games/<id> -> detail */
     if (*p == '\0' || strcmp(p, "/") == 0) {
-        cJSON *out = vapord_game_json(app->db, game_id);
+        cJSON *out;
+
+        if (strcmp(method, "GET") != 0) {
+            return vapord_send_errorf(c, 405, VAPOR_ERR_BAD_REQUEST, "use GET");
+        }
+        out = vapord_game_json(app->db, game_id, user_id);
         if (!out) {
             return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND,
                                       "no such game \"%s\"", game_id);
         }
         return vapord_send_json(c, 200, out);
+    }
+
+    /* PUT /games/<id>/rating  { "score": 1..5 } */
+    if (strcmp(p, "/rating") == 0 || strcmp(p, "/rating/") == 0) {
+        cJSON *body, *out;
+        char   err[256];
+        int    score, rc;
+        double avg = 0;
+        int    votes = 0, mine = 0;
+
+        if (strcmp(method, "PUT") != 0) {
+            return vapord_send_errorf(c, 405, VAPOR_ERR_BAD_REQUEST, "use PUT");
+        }
+        body = vapord_read_json(c, err, sizeof(err));
+        if (!body) {
+            return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST, "%s", err);
+        }
+        {
+            const cJSON *s = cJSON_GetObjectItemCaseSensitive(body, "score");
+            if (!cJSON_IsNumber(s)) {
+                cJSON_Delete(body);
+                return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST,
+                                          "score must be an integer 1-5");
+            }
+            score = (int)s->valuedouble;
+        }
+        cJSON_Delete(body);
+        if (score < 1 || score > 5) {
+            return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST,
+                                      "score must be an integer 1-5");
+        }
+        rc = vapord_rating_set(app->db, user_id, game_id, score);
+        if (rc == 1) {
+            return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND,
+                                      "no such game \"%s\"", game_id);
+        }
+        if (rc != 0) {
+            return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL,
+                                      "could not store the rating");
+        }
+        (void)vapord_rating_summary(app->db, game_id, user_id, &avg, &votes,
+                                    &mine);
+        out = cJSON_CreateObject();
+        if (!out) {
+            return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL, "out of memory");
+        }
+        cJSON_AddNumberToObject(out, "score", mine);
+        cJSON_AddNumberToObject(out, "rating_avg", votes > 0 ? avg : 0);
+        cJSON_AddNumberToObject(out, "rating_votes", votes);
+        return vapord_send_json(c, 200, out);
+    }
+
+    if (strcmp(method, "GET") != 0) {
+        return vapord_send_errorf(c, 405, VAPOR_ERR_BAD_REQUEST, "use GET");
     }
 
     /* GET /games/<id>/versions/<version>/manifest */

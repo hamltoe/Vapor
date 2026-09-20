@@ -421,8 +421,7 @@ is_junk_exec(const char *base)
         "setup.exe", "install.exe", "installer.exe", "unins000.exe",
         "uninstall.exe", "dxsetup.exe", "autorun.exe", "vcredist", "vc_redist",
         "unitycrashhandler", "crashreporter", "easyanticheat",
-        "dotnetfx", "hlds.exe", "hltv.exe", "upd.exe", "sierraup.exe",
-        "opforup.exe", "voice_tweak.exe", "qfiles.exe", NULL
+        "dotnetfx", NULL
     };
     size_t i;
 
@@ -435,7 +434,9 @@ is_junk_exec(const char *base)
     if (vapor_str_has_prefix(base, "unins") && vapor_str_ends_with_ci(base, ".exe")) {
         return 1;
     }
-    if (vapor_str_ends_with_ci(base, "update.exe")) {
+    if (vapor_str_eq_ci(base, "upd.exe")
+        || vapor_str_ends_with_ci(base, "up.exe")
+        || vapor_str_ends_with_ci(base, "update.exe")) {
         return 1;
     }
     return 0;
@@ -1126,11 +1127,12 @@ typedef struct {
     char name[256];
     char version[VAPOR_VERSION_MAX + 1];
     char developer[128];
-    char description[512];
+    char description[VAPOR_DESC_MAX];
     char windows_exec[VAPORD_PATH_MAX];
     char linux_exec[VAPORD_PATH_MAX];
     char cover[VAPORD_PATH_MAX];
     char package[VAPORD_PATH_MAX];
+    int  steam_appid;
 } sidecar;
 
 static const char *
@@ -1196,6 +1198,12 @@ load_sidecar(const char *dir, sidecar *out)
     }
     if ((s = json_str(root, "package", NULL))) {
         snprintf(out->package, sizeof(out->package), "%s", s);
+    }
+    {
+        const cJSON *appid = cJSON_GetObjectItemCaseSensitive(root, "steam_appid");
+        if (cJSON_IsNumber(appid) && appid->valuedouble > 0) {
+            out->steam_appid = (int)appid->valuedouble;
+        }
     }
     cJSON_Delete(root);
     return 0;
@@ -1530,6 +1538,7 @@ publish_game(vapord *app, const char *folder, const char *abs_dir,
     VLOG_INFO("discover: %s \"%s\" %s (%s, %s)", id, name, version, format,
               pretty);
     rc = 0;
+    vapord_meta_enrich(app, id, name, version, meta->steam_appid, 0);
 
 done:
     free(json);
@@ -1538,7 +1547,7 @@ done:
 }
 
 static int
-process_folder(vapord *app, const char *folder)
+process_folder(vapord *app, const char *folder, int *meta_left)
 {
     char            abs[VAPORD_PATH_MAX];
     sidecar         meta;
@@ -1725,6 +1734,13 @@ process_folder(vapord *app, const char *folder)
         }
         vapor_manifest_free(&probe);
         if (present) {
+            if (meta_left && *meta_left > 0
+                && vapord_meta_enrich(app, id, name,
+                                      prev.version[0] ? prev.version : version,
+                                      meta.steam_appid, 0)
+                       == 1) {
+                (*meta_left)--;
+            }
             return 0;
         }
     }
@@ -1792,30 +1808,34 @@ vapord_discover(vapord *app)
     }
 
     VLOG_INFO("discover: scanning %s", app->cfg.library_root);
-    while ((ent = readdir(d)) != NULL) {
-        char        abs[VAPORD_PATH_MAX];
-        struct stat st;
+    {
+        int meta_left = 8;
 
-        if (ent->d_name[0] == '.') {
-            continue;
+        while ((ent = readdir(d)) != NULL) {
+            char        abs[VAPORD_PATH_MAX];
+            struct stat st;
+
+            if (ent->d_name[0] == '.') {
+                continue;
+            }
+            if (strlen(ent->d_name) >= 256) {
+                VLOG_WARN("discover: folder name \"%s\" is too long; skipping",
+                          ent->d_name);
+                continue;
+            }
+            if (join2(abs, sizeof(abs), app->cfg.library_root, ent->d_name) != 0) {
+                continue;
+            }
+            if (stat(abs, &st) != 0 || !S_ISDIR(st.st_mode)) {
+                continue;
+            }
+            if (strlist_push(&seen, ent->d_name) != 0) {
+                closedir(d);
+                strlist_free(&seen);
+                return -1;
+            }
+            process_folder(app, ent->d_name, &meta_left);
         }
-        if (strlen(ent->d_name) >= 256) {
-            VLOG_WARN("discover: folder name \"%s\" is too long; skipping",
-                      ent->d_name);
-            continue;
-        }
-        if (join2(abs, sizeof(abs), app->cfg.library_root, ent->d_name) != 0) {
-            continue;
-        }
-        if (stat(abs, &st) != 0 || !S_ISDIR(st.st_mode)) {
-            continue;
-        }
-        if (strlist_push(&seen, ent->d_name) != 0) {
-            closedir(d);
-            strlist_free(&seen);
-            return -1;
-        }
-        process_folder(app, ent->d_name);
     }
     closedir(d);
 

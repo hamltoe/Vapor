@@ -352,6 +352,24 @@ cmd_info(vapor_client *vc, const char *game_id)
     if (d.game.has_cover) {
         printf("  cover .......... yes\n");
     }
+    if (d.game.steam_rating_label[0] || d.game.steam_rating_pct > 0) {
+        printf("  steam .......... %s",
+               d.game.steam_rating_label[0] ? d.game.steam_rating_label
+                                            : "rated");
+        if (d.game.steam_rating_pct > 0) {
+            printf(" (%d%% of %d)", d.game.steam_rating_pct,
+                   d.game.steam_rating_count);
+        }
+        printf("\n");
+    }
+    if (d.game.rating_votes > 0) {
+        printf("  community ...... %.1f / 5  (%d rating%s)\n",
+               d.game.rating_avg, d.game.rating_votes,
+               d.game.rating_votes == 1 ? "" : "s");
+    }
+    if (d.game.my_rating > 0) {
+        printf("  your rating .... %d / 5\n", d.game.my_rating);
+    }
     if (d.game.update_available) {
         printf("  update ......... %s -> %s\n", d.game.installed_version,
                d.game.latest_version);

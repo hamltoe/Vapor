@@ -15,16 +15,20 @@ Four programs, one CMake project, C11.
 
 | Program | Where it runs | Role |
 | --- | --- | --- |
-| `vapord` | Linux | HTTP server: accounts, catalog, ranged downloads |
-| `vapor-admin` | Linux, next to the server | Package a game folder and register it |
-| `vapor` | Windows or Linux | CLI: register, list, install, launch |
-| `vapor-gui` | Windows or Linux | The same work, in a window |
+| `vapord` | Linux, with a monitor | Host window + HTTP server |
+| `vapor-gui` | Windows or Linux | Player library: sign in, install, play |
+| `vapor-admin` | Linux | Optional ingest CLI (`discover` / `add`) |
+| `vapor` | Windows or Linux | Optional CLI for scripts and tests |
+
+The garage box is meant to have a display: `vapord` opens a window (catalog,
+logs, Discover). Pass `--headless` only for tests or systemd. Player PCs run
+`vapor-gui`; there is no second "server GUI" binary.
 
 The client never mounts the server disk. Everything goes over HTTP, so a
 NAS versus a local folder is just a `library_root` path on the server.
 
-Typical household setup: build and run **vapord** on a Linux box (or
-WSL), then build the **client** on each player PC.
+Typical household setup: run **vapord** on the Linux box (or WSL with WSLg),
+then **vapor-gui** on each player PC.
 
 ## Prerequisites
 
@@ -38,8 +42,8 @@ cd Vapor
 
 ### Linux server and Linux client (Debian / Ubuntu / WSL)
 
-You need a C compiler, CMake, libcurl, libsodium, and (for the GUI)
-SDL2 plus OpenGL headers.
+You need a C compiler, CMake, libcurl, libsodium, SDL2, and OpenGL
+headers.
 
 ```
 sudo bash scripts/bootstrap-linux.sh
@@ -55,12 +59,8 @@ vapord  vapor-admin  vapor  vapor-gui  vapor-selftest
 
 Useful bootstrap flags:
 
-- `--server-only` — skip libcurl and SDL2 (headless host)
-- `--no-gui` — skip SDL2 / OpenGL
+- `--server-only` — skip libcurl (host box that does not build the player client)
 - `--client-only` — skip libsodium (you will not build vapord)
-
-`scripts/build-linux.sh` turns the GUI on automatically when `pkg-config`
-finds SDL2 and OpenGL. Pass `-DVAPOR_BUILD_GUI=OFF` to force it off.
 
 ### Windows client
 
@@ -83,8 +83,8 @@ Binaries land in `build-windows\bin\`:
 vapor.exe  vapor-gui.exe  vapor-selftest.exe
 ```
 
-Pass `-NoGui` if you only want the CLI. Re-run `vendor-deps.ps1` if the
-GUI is skipped because `third_party\sdl2` is missing.
+Pass `-NoGui` only if you must build the CLI without SDL2. Re-run
+`vendor-deps.ps1` if the GUI is skipped because `third_party\sdl2` is missing.
 
 A Windows machine can still host the **server** by building it inside
 WSL with the Linux steps above. After Ubuntu is installed:
@@ -150,8 +150,8 @@ run/library/
 ```
 
 The folder name is the catalog title (`My Game` → id `my-game`). vapord
-scans at startup and every minute. `vapor-admin discover` scans once
-immediately. Optional `vapor.json` in the folder overrides id, version,
+scans at startup and every hour. The host window has **Discover now**;
+`vapor-admin discover` also scans once immediately. Optional `vapor.json` in the folder overrides id, version,
 and launch paths; see [Docs/manifest.md](Docs/manifest.md).
 
 `vapor-admin add` still packages a folder by hand when you want full

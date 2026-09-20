@@ -94,7 +94,7 @@ cmd_start() {
         exit 1
     fi
 
-    nohup "${bin}" -H 0.0.0.0 -p "${port}" \
+    nohup env DISPLAY="${DISPLAY:-:0}" "${bin}" -H 0.0.0.0 -p "${port}" \
         -r "${data}/content" \
         -L "${library}" \
         -d "${data}/vapor.db" \
@@ -105,7 +105,8 @@ cmd_start() {
     for _ in $(seq 1 30); do
         if curl -fsS --max-time 1 "http://127.0.0.1:${port}/api/v1/health" >/dev/null 2>&1; then
             echo "vapord ${port} is up"
-            echo "  Windows client: vapor config server http://127.0.0.1:${port}"
+            echo "  Player GUI ..... ${root}/build-windows/bin/vapor-gui.exe"
+            echo "  server URL ..... http://127.0.0.1:${port}"
             echo "  data .......... ${data}"
             echo "  library ....... ${library}"
             return 0

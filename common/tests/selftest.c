@@ -598,7 +598,10 @@ static void
 test_disc_finish_install(void)
 {
     const char *dir = "vapor-disc-selftest-out";
-    const char *stub = "vapor-disc-selftest-out/HL.DAT";
+    const char *mod = "vapor-disc-selftest-out/mod";
+    const char *stub = "vapor-disc-selftest-out/GAME.DAT";
+    const char *real = "vapor-disc-selftest-out/mod/GAME.DAT";
+    const char *orphan = "vapor-disc-selftest-out/orphan.dat";
     const char *autorun = "vapor-disc-selftest-out/AUTORUN.EXE";
     const char *keep = "vapor-disc-selftest-out/keep.dat";
     FILE       *f;
@@ -607,13 +610,28 @@ test_disc_finish_install(void)
     puts("disc_finish_install");
 #if defined(_WIN32)
     _mkdir(dir);
+    _mkdir(mod);
 #else
     mkdir(dir, 0755);
+    mkdir(mod, 0755);
 #endif
     f = fopen(stub, "wb");
-    check(f != NULL, "writes tiny HL.DAT stub");
+    check(f != NULL, "writes tiny root GAME.DAT");
     if (f) {
         fwrite("stub", 1, 4, f);
+        fclose(f);
+    }
+    memset(buf, 0xab, sizeof(buf));
+    f = fopen(real, "wb");
+    check(f != NULL, "writes larger GAME.DAT in a subdirectory");
+    if (f) {
+        fwrite(buf, 1, sizeof(buf), f);
+        fclose(f);
+    }
+    f = fopen(orphan, "wb");
+    check(f != NULL, "writes orphan tiny dat");
+    if (f) {
+        fwrite("x", 1, 1, f);
         fclose(f);
     }
     f = fopen(autorun, "wb");
@@ -622,9 +640,8 @@ test_disc_finish_install(void)
         fwrite("x", 1, 1, f);
         fclose(f);
     }
-    memset(buf, 0xab, sizeof(buf));
     f = fopen(keep, "wb");
-    check(f != NULL, "writes a large data file");
+    check(f != NULL, "writes a large root dat");
     if (f) {
         fwrite(buf, 1, sizeof(buf), f);
         fclose(f);
@@ -633,7 +650,17 @@ test_disc_finish_install(void)
     vapor_disc_finish_install(dir);
 
     f = fopen(stub, "rb");
-    check(f == NULL, "removes tiny HL.DAT stub");
+    check(f == NULL, "removes tiny root dat with a larger namesake");
+    if (f) {
+        fclose(f);
+    }
+    f = fopen(real, "rb");
+    check(f != NULL, "keeps the larger namesake");
+    if (f) {
+        fclose(f);
+    }
+    f = fopen(orphan, "rb");
+    check(f != NULL, "leaves a tiny dat with no namesake");
     if (f) {
         fclose(f);
     }
@@ -643,17 +670,21 @@ test_disc_finish_install(void)
         fclose(f);
     }
     f = fopen(keep, "rb");
-    check(f != NULL, "leaves other files alone");
+    check(f != NULL, "leaves a large root dat");
     if (f) {
         fclose(f);
     }
 
     remove(stub);
+    remove(real);
+    remove(orphan);
     remove(autorun);
     remove(keep);
 #if defined(_WIN32)
+    _rmdir(mod);
     _rmdir(dir);
 #else
+    rmdir(mod);
     rmdir(dir);
 #endif
 }

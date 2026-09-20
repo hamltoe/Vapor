@@ -138,12 +138,14 @@ job_main(void *ud)
     vapor_job_kind kind;
     char           game_id[VAPOR_ID_MAX + 1];
     char           version[VAPOR_VERSION_MAX + 1];
+    int            rating_score = 0;
 
     /* Copied out once so the rest of the function needs no lock for them. */
     SDL_LockMutex(app->job.lock);
     kind = app->job.kind;
     snprintf(game_id, sizeof(game_id), "%s", app->job.game_id);
     snprintf(version, sizeof(version), "%s", app->job.version);
+    rating_score = app->job.rating_score;
     SDL_UnlockMutex(app->job.lock);
 
     switch (kind) {
@@ -286,6 +288,23 @@ job_main(void *ud)
         break;
     }
 
+    case JOB_RATE: {
+        vapor_rating r;
+
+        set_status(app, "saving your rating...");
+        if (vapor_game_rate(vc, game_id, rating_score, &r) != 0) {
+            finish(app, 1, "%s", vc->err);
+            break;
+        }
+        SDL_LockMutex(app->job.lock);
+        app->job.rating_avg = r.rating_avg;
+        app->job.rating_votes = r.rating_votes;
+        app->job.rating_score = r.my_rating;
+        SDL_UnlockMutex(app->job.lock);
+        finish(app, 0, "rated %s %d / 5", game_id, r.my_rating);
+        break;
+    }
+
     case JOB_NONE:
     default:
         finish(app, 1, "nothing to do");
@@ -299,7 +318,7 @@ job_main(void *ud)
  * single-owner rule on vapor_client true. */
 static int
 start(vapor_app *app, vapor_job_kind kind, const char *game_id,
-      const char *version)
+      const char *version, int rating_score)
 {
     if (vapor_gui_job_busy(app) || app->job.done) {
         return -1;
@@ -323,6 +342,9 @@ start(vapor_app *app, vapor_job_kind kind, const char *game_id,
              game_id ? game_id : "");
     snprintf(app->job.version, sizeof(app->job.version), "%s",
              version ? version : "");
+    app->job.rating_score = rating_score;
+    app->job.rating_avg = 0;
+    app->job.rating_votes = 0;
     SDL_UnlockMutex(app->job.lock);
 
     app->job.thread = SDL_CreateThread(job_main, "vapor-job", app);
@@ -354,37 +376,43 @@ vapor_gui_start_login(vapor_app *app, int registering)
     app->server_url_len = (int)strlen(app->server_url);
     (void)vapor_client_save_config(app->vc);
 
-    return start(app, registering ? JOB_REGISTER : JOB_LOGIN, NULL, NULL);
+    return start(app, registering ? JOB_REGISTER : JOB_LOGIN, NULL, NULL, 0);
 }
 
 int
 vapor_gui_start_refresh(vapor_app *app)
 {
-    return start(app, JOB_REFRESH, NULL, NULL);
+    return start(app, JOB_REFRESH, NULL, NULL, 0);
 }
 
 int
 vapor_gui_start_install(vapor_app *app, const char *game_id, const char *version)
 {
-    return start(app, JOB_INSTALL, game_id, version);
+    return start(app, JOB_INSTALL, game_id, version, 0);
 }
 
 int
 vapor_gui_start_uninstall(vapor_app *app, const char *game_id)
 {
-    return start(app, JOB_UNINSTALL, game_id, NULL);
+    return start(app, JOB_UNINSTALL, game_id, NULL, 0);
 }
 
 int
 vapor_gui_start_verify(vapor_app *app, const char *game_id)
 {
-    return start(app, JOB_VERIFY, game_id, NULL);
+    return start(app, JOB_VERIFY, game_id, NULL, 0);
 }
 
 int
 vapor_gui_start_launch(vapor_app *app, const char *game_id)
 {
-    return start(app, JOB_LAUNCH, game_id, NULL);
+    return start(app, JOB_LAUNCH, game_id, NULL, 0);
+}
+
+int
+vapor_gui_start_rate(vapor_app *app, const char *game_id, int score)
+{
+    return start(app, JOB_RATE, game_id, NULL, score);
 }
 
 void
@@ -402,22 +430,43 @@ vapor_gui_job_poll(vapor_app *app)
     kind = app->job.kind;
     failed = app->job.failed;
     snprintf(message, sizeof(message), "%s", app->job.message);
-    app->job.done = 0;
-    app->job.kind = JOB_NONE;
-    SDL_UnlockMutex(app->job.lock);
+    {
+        char   gid[VAPOR_ID_MAX + 1];
+        int    score = app->job.rating_score;
+        double avg = app->job.rating_avg;
+        int    votes = app->job.rating_votes;
 
-    /* Joining here is what transfers the client back to this thread. */
-    if (app->job.thread) {
-        SDL_WaitThread(app->job.thread, NULL);
-        app->job.thread = NULL;
-    }
+        snprintf(gid, sizeof(gid), "%s", app->job.game_id);
+        app->job.done = 0;
+        app->job.kind = JOB_NONE;
+        SDL_UnlockMutex(app->job.lock);
 
-    if (message[0]) {
-        vapor_gui_notice(app, failed, "%s", message);
-    }
+        /* Joining here is what transfers the client back to this thread. */
+        if (app->job.thread) {
+            SDL_WaitThread(app->job.thread, NULL);
+            app->job.thread = NULL;
+        }
 
-    if (failed) {
-        return;
+        if (message[0]) {
+            vapor_gui_notice(app, failed, "%s", message);
+        }
+
+        if (failed) {
+            return;
+        }
+
+        if (kind == JOB_RATE) {
+            size_t i;
+            for (i = 0; i < app->ngames; i++) {
+                if (strcmp(app->games[i].id, gid) == 0) {
+                    app->games[i].my_rating = score;
+                    app->games[i].rating_avg = avg;
+                    app->games[i].rating_votes = votes;
+                    break;
+                }
+            }
+            return;
+        }
     }
 
     switch (kind) {

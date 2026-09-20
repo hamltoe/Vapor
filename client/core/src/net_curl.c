@@ -185,6 +185,11 @@ vapor_net_perform(const vapor_net_req *req, vapor_net_res *res)
                          (long)(req->body ? strlen(req->body) : 0));
     } else if (strcmp(req->method, "GET") != 0) {
         curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, req->method);
+        if (req->body) {
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req->body);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,
+                             (long)strlen(req->body));
+        }
     }
 
     rc = curl_easy_perform(curl);

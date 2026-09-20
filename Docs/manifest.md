@@ -76,11 +76,14 @@ the packed game files such as `WONAuth.dll` are unpacked into the same
 tree and the installer executable is dropped from the zip. The original
 disc image is left in place. After the client extracts the zip, it
 inspects the install tree and picks a launchable executable (`HL.EXE` on
-a Half-Life disc, for example). `setup.exe` and `autorun.exe` are ignored
-when a real game binary is present. A leftover `SETUP.EXE` in an older zip
+a Half-Life disc, for example). Installers and updaters (`setup.exe`,
+`upd.exe`, `*up.exe`, `*update.exe`) are ignored when a real game binary
+is present. A leftover `SETUP.EXE` in an older zip
 is unpacked the same way on install. If the image cannot be unpacked
 (UDF-only DVDs), the ISO is wrapped as a file and the client tries the same
-unpack on install.
+unpack on install. After a SETUP unpack, autorun files are dropped, and a
+tiny root `*.DAT` is removed only when a larger file of the same name
+exists in a subdirectory.
 
 `iso` and `file` still skip extraction for older manifests: the client
 copies the downloaded payload into the install directory.
@@ -133,9 +136,14 @@ An optional `vapor.json` in a discovered game folder overrides detection:
   "windows_exec": "hollow_knight.exe",
   "linux_exec": "hollow_knight.x86_64",
   "cover": "art.png",
-  "package": "HollowKnight.zip"
+  "package": "HollowKnight.zip",
+  "steam_appid": 367520
 }
 ```
+
+`vapor.json` may also set `steam_appid` so discovery does not have to
+guess the Steam store listing when filling in art, description, and the
+public review score.
 
 ## Auto-discovery
 

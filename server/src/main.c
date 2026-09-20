@@ -10,7 +10,7 @@
 
 #include "vapor/util.h"
 
-static volatile sig_atomic_t g_stop;
+static volatile int g_stop;
 
 static void
 on_signal(int sig)
@@ -84,7 +84,7 @@ usage(const char *argv0)
 {
     printf("vapord %s - Vapor game content server\n\n", VAPOR_VERSION_STRING);
     printf("usage: %s [-c CONFIG] [-H ADDR] [-p PORT] [-r CONTENT_ROOT] "
-           "[-L LIBRARY_ROOT] [-d DB_PATH]\n\n",
+           "[-L LIBRARY_ROOT] [-d DB_PATH] [--headless]\n\n",
            argv0);
     printf("  -c CONFIG        read settings from CONFIG (key = value)\n");
     printf("  -H ADDR          bind address (default 0.0.0.0)\n");
@@ -93,6 +93,7 @@ usage(const char *argv0)
     printf("  -L LIBRARY_ROOT  drop folder of game directories to auto-discover\n");
     printf("  -d DB_PATH       SQLite database path\n");
     printf("  --closed         reject new registrations\n");
+    printf("  --headless       no host window (tests, systemd)\n");
     printf("  -h, --help       this message\n");
 }
 
@@ -107,7 +108,7 @@ main(int argc, char **argv)
     char              port_str[sizeof(app.cfg.bind_addr) + 16];
     char              threads_str[32];
     const char       *options[16];
-    int               i, nopt = 0;
+    int               i, nopt = 0, headless = 0;
 
     memset(&app, 0, sizeof(app));
     vapord_config_defaults(&app.cfg);
@@ -144,6 +145,8 @@ main(int argc, char **argv)
                      argv[++i]);
         } else if (strcmp(argv[i], "--closed") == 0) {
             app.cfg.enable_registration = 0;
+        } else if (strcmp(argv[i], "--headless") == 0) {
+            headless = 1;
         } else {
             fprintf(stderr, "vapord: unexpected argument \"%s\"\n", argv[i]);
             usage(argv[0]);
@@ -239,34 +242,40 @@ main(int argc, char **argv)
     fflush(stdout);
 
     vapord_token_prune(app.db, vapor_now_unix());
-    if (app.cfg.library_root[0]) {
-        vapord_discover(&app);
-    }
 
-    {
-        int64_t last_discover = vapor_now_unix();
-        int64_t last_prune = last_discover;
+    if (headless) {
+        if (app.cfg.library_root[0]) {
+            vapord_discover(&app);
+        }
+        {
+            int64_t last_discover = vapor_now_unix();
+            int64_t last_prune = last_discover;
 
-        while (!g_stop) {
-#if defined(_WIN32)
-            Sleep(200);
-#else
-            struct timespec ts = { 0, 200 * 1000 * 1000 };
-            nanosleep(&ts, NULL);
-#endif
-            {
-                int64_t now = vapor_now_unix();
-                if (app.cfg.library_root[0] && app.cfg.discover_interval > 0
-                    && now - last_discover >= app.cfg.discover_interval) {
-                    vapord_discover(&app);
-                    last_discover = now;
-                }
-                if (now - last_prune >= 3600) {
-                    vapord_token_prune(app.db, now);
-                    last_prune = now;
+            while (!g_stop) {
+                struct timespec ts = { 0, 200 * 1000 * 1000 };
+                nanosleep(&ts, NULL);
+                {
+                    int64_t now = vapor_now_unix();
+                    if (app.cfg.library_root[0] && app.cfg.discover_interval > 0
+                        && now - last_discover >= app.cfg.discover_interval) {
+                        vapord_discover(&app);
+                        last_discover = now;
+                    }
+                    if (now - last_prune >= 3600) {
+                        vapord_token_prune(app.db, now);
+                        last_prune = now;
+                    }
                 }
             }
         }
+    } else if (vapord_gui_run(&app, &g_stop) != 0) {
+        fprintf(stderr,
+                "vapord: could not open the host window.\n"
+                "        Need a display (WSLg on WSL). Use --headless for tests.\n");
+        mg_stop(ctx);
+        mg_exit_library();
+        vapord_db_close(&app);
+        return 1;
     }
 
     VLOG_INFO("shutting down");

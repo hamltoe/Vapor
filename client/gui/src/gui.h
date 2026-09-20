@@ -46,7 +46,8 @@ typedef enum {
     JOB_INSTALL,
     JOB_UNINSTALL,
     JOB_VERIFY,
-    JOB_LAUNCH
+    JOB_LAUNCH,
+    JOB_RATE
 } vapor_job_kind;
 
 typedef struct {
@@ -64,6 +65,9 @@ typedef struct {
     char     message[512];      /* the outcome, shown when it finishes */
     uint64_t done_bytes;
     uint64_t total_bytes;
+    int      rating_score;      /* JOB_RATE input */
+    double   rating_avg;        /* JOB_RATE result */
+    int      rating_votes;
 } vapor_job;
 
 /* Cover art, one per catalog row. The worker only ever fills in `path`; the
@@ -113,7 +117,7 @@ typedef struct {
     char  search[64];
     int   search_len;
     int   show_settings;
-    char *selected;             /* id of the expanded card, or NULL */
+    char  selected_id[VAPOR_ID_MAX + 1]; /* details page; empty means the grid */
     int   quit;
 } vapor_app;
 
@@ -137,6 +141,7 @@ int  vapor_gui_start_install(vapor_app *app, const char *game_id,
 int  vapor_gui_start_uninstall(vapor_app *app, const char *game_id);
 int  vapor_gui_start_verify(vapor_app *app, const char *game_id);
 int  vapor_gui_start_launch(vapor_app *app, const char *game_id);
+int  vapor_gui_start_rate(vapor_app *app, const char *game_id, int score);
 
 void vapor_gui_notice(vapor_app *app, int is_error, const char *fmt, ...);
 

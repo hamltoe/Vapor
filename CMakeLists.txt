@@ -28,7 +28,14 @@ endif()
 
 option(VAPOR_BUILD_SERVER "Build vapord and vapor-admin" ${_vapor_server_default})
 option(VAPOR_BUILD_CLIENT "Build libvapor and the vapor CLI" ON)
-option(VAPOR_BUILD_GUI    "Build the Nuklear + SDL2 GUI client" OFF)
+option(VAPOR_BUILD_GUI    "Build SDL2/Nuklear windows (vapord host UI and vapor-gui)" ON)
+
+if(VAPOR_BUILD_SERVER AND NOT VAPOR_BUILD_GUI)
+    message(FATAL_ERROR
+        "vapord always presents a host window, so VAPOR_BUILD_GUI must be ON "
+        "when building the server. Install SDL2 (scripts/bootstrap-linux.sh). "
+        "Runtime --headless is for tests and systemd, not a separate binary.")
+endif()
 
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite/sqlite3.c")
     message(FATAL_ERROR

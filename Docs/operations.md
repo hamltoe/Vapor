@@ -20,8 +20,8 @@ bash scripts/vendor-deps.sh
 bash scripts/build-linux.sh
 ```
 
-Binaries land in `build-linux/bin/`: `vapord`, `vapor-admin`, `vapor`,
-`vapor-gui`, `vapor-selftest`.
+Binaries land in `build-linux/bin/`: `vapord` (host window + HTTP),
+`vapor-gui`, `vapor-admin`, `vapor`, `vapor-selftest`.
 
 **Windows**
 
@@ -32,18 +32,18 @@ powershell -File scripts/vendor-deps.ps1
 powershell -File scripts/build-windows.ps1
 ```
 
-The Windows build produces the client only (`vapor`, `vapor-gui`).
-vapord needs libsodium and is not built there. SDL2 is fetched into
-`third_party/sdl2` by the vendor script.
+The Windows build produces the player client (`vapor-gui`, plus `vapor`
+for scripts). vapord needs libsodium and is not built there. SDL2 is fetched
+into `third_party/sdl2` by the vendor script.
 
-Pass `-NoGui` to `build-windows.ps1` if you only want the CLI.
+Pass `-NoGui` to `build-windows.ps1` only if you must skip SDL2.
 
 ## First local run
 
 On Linux, in two terminals:
 
 ```
-# server
+# server (opens a host window; add --headless for a terminal-only run)
 ./build-linux/bin/vapord -H 127.0.0.1 -p 8777 \
     -r ./run/content -L ./run/library -d ./run/vapor.db
 
@@ -75,6 +75,10 @@ The GUI is the same loop with a window:
 ```
 
 ## Deploying vapord
+
+On a garage box with a monitor, run `vapord` from a desktop session so the
+host window stays up. `deploy/vapord.service` is the unattended path and
+passes `--headless`.
 
 Recommended layout on the Linux host:
 
@@ -128,11 +132,18 @@ id (`Hollow Knight` → `hollow-knight`). Discovery prefers a zip, then
 an unpacked executable tree, then an ISO. An ISO is unpacked (ISO 9660 /
 Joliet). If the disc ships a Wise installer, that is unpacked too and
 those files are zipped; the original disc image is left in
-the drop folder. Executables named `setup.exe`
-and similar are ignored when a real game binary is present.
+the drop folder. After unpack, `autorun.exe` / `autorun.inf` are dropped.
+A tiny root `*.DAT` is removed only when a larger file of the same name
+exists in a subdirectory (a CD volume stub next to real data). Launch
+picking ignores installers plus updaters named `upd.exe`, `*up.exe`, or
+`*update.exe`.
 
-Drop a new folder in and wait up to `discover_interval` seconds (or run
-`vapor-admin -L PATH discover`). Removing a folder drops that game from
+After a folder is published, vapord asks Steam for cover art, a short
+description, and the public review score when those fields are empty.
+
+Drop a new folder in and wait up to an hour (`discover_interval`, default
+3600 seconds), hit **Discover now** in the host window, or run
+`vapor-admin -L PATH discover`. Removing a folder drops that game from
 the catalog; bytes on disk in `content_root` are left alone.
 
 `vapor-admin add` still works for a fully specified ingest. An
@@ -186,18 +197,26 @@ The pin is stored in `config.ini` as `pinned_pubkey` and passed to
 connect when a pin is set rather than silently falling back to CA
 checks. Use Caddy plus a public certificate for Windows clients.
 
-## Cover art
+## Cover art and descriptions
 
 Pass `--cover FILE` to `vapor-admin add`. PNG or JPEG, 4 MiB or smaller.
+
+Discovery also looks up the title on the public Steam store (no API key)
+and fills in empty description, developer, cover, and Steam community
+score. A local `cover.png` / `cover.jpg` or a `vapor.json` description
+wins over Steam. Lookups are cached for a week. Force a refresh with
+`vapor-admin enrich` or `vapor-admin enrich GAME`.
+
 The library grid fetches `/games/{id}/versions/{version}/cover` into
 `covers/` under the client data directory and decodes it on the UI
-thread. A game without art still shows a text card.
+thread. Click a tile to open the details page (description, ratings,
+Install / Verify / Remove). A game without art still shows a text card.
 
 ## Updates
 
 `vapor list` prints `[update available]` when the server's latest
-version is newer than the installed one. In the GUI the middle button
-becomes **Update** and runs a forced install of that version.
+version is newer than the installed one. In the GUI the details page
+shows **Update** and runs a forced install of that version.
 
 There is no background updater. Refresh the catalog (or reopen the GUI)
 to see new versions after you ingest them.

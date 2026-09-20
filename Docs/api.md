@@ -121,7 +121,13 @@ Catalog, one row per game that has at least one published version.
       "size": 524288000,
       "sha256": "9f2c…",
       "published_at": 1760000000,
-      "has_cover": true
+      "has_cover": true,
+      "rating_avg": 4.5,
+      "rating_votes": 8,
+      "my_rating": 5,
+      "steam_rating_pct": 96,
+      "steam_rating_count": 128000,
+      "steam_rating_label": "Overwhelmingly Positive"
     }
   ]
 }
@@ -131,13 +137,30 @@ Catalog, one row per game that has at least one published version.
 `1.9`), not SQLite text sort. `has_cover` is true when that latest
 version has art on disk.
 
+`rating_*` is the local Vapor community (1–5 stars). `steam_rating_*`
+is filled in by vapord from the public Steam store when it can match
+the title; zeros and an empty label mean no match yet.
+
 The client merges this with local install records and sets
 `installed`, `installed_version`, `update_available`, and `play_seconds`
 before any frontend sees the row.
 
 ### `GET /api/v1/games/{id}`
 
-Detail plus every published version. `has_cover` is per version.
+Detail plus every published version. `has_cover` is per version. The
+same rating fields as the catalog appear on the game object.
+
+### `PUT /api/v1/games/{id}/rating`
+
+```json
+{ "score": 4 }
+```
+
+`score` is an integer 1–5. Upserts this user's rating. Returns:
+
+```json
+{ "score": 4, "rating_avg": 4.2, "rating_votes": 9 }
+```
 
 ### `GET /api/v1/games/{id}/versions/{version}/manifest`
 

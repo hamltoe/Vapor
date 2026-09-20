@@ -26,6 +26,13 @@ entry_from_json(vapor_client *vc, const cJSON *g, vapor_catalog_entry *e)
     vapor_json_copy(e->description, sizeof(e->description), g, "description", "");
     e->size = (uint64_t)vapor_json_num(g, "size", 0);
     e->has_cover = vapor_json_bool(g, "has_cover", 0);
+    e->rating_avg = vapor_json_num(g, "rating_avg", 0);
+    e->rating_votes = (int)vapor_json_num(g, "rating_votes", 0);
+    e->my_rating = (int)vapor_json_num(g, "my_rating", 0);
+    e->steam_rating_pct = (int)vapor_json_num(g, "steam_rating_pct", 0);
+    e->steam_rating_count = (int)vapor_json_num(g, "steam_rating_count", 0);
+    vapor_json_copy(e->steam_rating_label, sizeof(e->steam_rating_label), g,
+                    "steam_rating_label", "");
 
     if (e->id[0] && vapor_db_get_install(vc, e->id, &rec) == 0) {
         e->installed = 1;
@@ -256,4 +263,46 @@ vapor_game_detail_free(vapor_game_detail *d)
     free(d->versions);
     d->versions = NULL;
     d->nversions = 0;
+}
+
+int
+vapor_game_rate(vapor_client *vc, const char *game_id, int score,
+                vapor_rating *out)
+{
+    vapor_response r;
+    cJSON         *body;
+    char           path[256];
+    char           payload[64];
+
+    if (out) {
+        memset(out, 0, sizeof(*out));
+    }
+    if (!vapor_id_is_valid(game_id)) {
+        vapor_client_set_error(vc, "\"%s\" is not a valid game id", game_id);
+        return -1;
+    }
+    if (score < 1 || score > 5) {
+        vapor_client_set_error(vc, "rating must be 1 to 5");
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s/%s/rating", VAPOR_EP_GAMES, game_id);
+    snprintf(payload, sizeof(payload), "{\"score\":%d}", score);
+
+    if (vapor_api_put(vc, path, payload, 1, &r) != 0) {
+        vapor_response_free(&r);
+        return -1;
+    }
+    body = vapor_json_parse_response(&r);
+    vapor_response_free(&r);
+    if (!body) {
+        vapor_client_set_error(vc, "could not read the rating response");
+        return -1;
+    }
+    if (out) {
+        out->my_rating = (int)vapor_json_num(body, "score", (double)score);
+        out->rating_avg = vapor_json_num(body, "rating_avg", 0);
+        out->rating_votes = (int)vapor_json_num(body, "rating_votes", 0);
+    }
+    cJSON_Delete(body);
+    return 0;
 }
