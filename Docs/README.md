@@ -24,7 +24,7 @@ Four programs, one shared client library, all C11, one CMake project.
 
 - **vapord** — Linux HTTP server. Catalog, accounts, ranged downloads.
 - **vapor-admin** — Server-side ingest. Zips a folder, writes a manifest,
-  registers the game.
+  registers the game, or runs `discover` against `library_root`.
 - **vapor** — CLI on Windows and Linux. Register, list, install, launch.
 - **vapor-gui** — The same `libvapor` calls behind a Nuklear + SDL2 window.
 

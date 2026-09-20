@@ -49,8 +49,9 @@ parser in `common/src/manifest.c`.
 | `version` | Compared naturally: `1.10` > `1.9` |
 | `cover` | Optional. Bare filename only (`cover.png` or `cover.jpg`) |
 | `package.file` | Bare filename. No `/` or `\` |
+| `package.format` | `zip` (extract, then inspect), `iso` or `file` (copy as-is) |
 | `package.sha256` | 64 lowercase hex characters |
-| `targets[].exec` | Relative to the install dir. No `..` |
+| `targets[].exec` | Relative to the install dir. No `..`. Optional when the payload is a disc image |
 | `targets[].runtime` | `null` or `"native"` today; reserved for `"proton"` later |
 
 A hostile id, version, cover, or package name cannot escape the content
@@ -66,7 +67,17 @@ dependencies.
 
 If a game later needs symlinks or fine-grained permissions, swap miniz
 for libarchive and package `.tar.zst`. `package.format` already exists
-so both can coexist.
+so zip, iso, and other payloads can coexist.
+
+vapord wraps each `.iso` / `.img` it finds in `library_root` into a zip
+and points the manifest at that zip. The original disc image is left in
+place and not served. After the client extracts the zip, it inspects the
+install tree: a native executable becomes the launch target; a leftover
+`.iso` is treated as a disc image (install succeeds, launch is not
+supported yet).
+
+`iso` and `file` still skip extraction for older manifests: the client
+copies the downloaded payload into the install directory.
 
 `strip_prefix` drops a leading folder inside the zip so a publisher can
 ship `HollowVale/bin/game` and still install as `<library>/hollow-vale/bin/game`.
@@ -105,6 +116,26 @@ The generated manifest is parsed before it is written. If the client
 would reject it, ingest fails instead of shipping something
 uninstallable.
 
+An optional `vapor.json` in a discovered game folder overrides detection:
+
+```json
+{
+  "id": "hollow-knight",
+  "name": "Hollow Knight",
+  "version": "1.5.78",
+  "developer": "Team Cherry",
+  "windows_exec": "hollow_knight.exe",
+  "linux_exec": "hollow_knight.x86_64",
+  "cover": "art.png",
+  "package": "HollowKnight.zip"
+}
+```
+
+## Auto-discovery
+
+vapord scans `library_root` and publishes each subdirectory. See
+[operations.md](operations.md#auto-discovery).
+
 ## Install
 
 `vapor install <id>` (or the GUI Install button):
@@ -112,8 +143,9 @@ uninstallable.
 1. Fetch the manifest for `latest` or a given version.
 2. Stream the archive to `<library>/.vapor/downloads/` with Range resume.
 3. Verify SHA-256 against the manifest.
-4. Extract with miniz into `<library>/<id>/`.
-5. Apply `exec_bits` on Linux.
+4. Extract a zip with miniz, then inspect the tree for a launchable
+   executable or a disc image. Copy an `iso`/`file` payload as-is.
+5. Apply `exec_bits` on Linux when a native target was found.
 6. Record the install in the local SQLite.
 
 Verify-before-extract means a truncated download cannot produce a

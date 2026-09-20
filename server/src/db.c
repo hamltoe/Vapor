@@ -51,6 +51,15 @@ static const char SCHEMA[] =
  * reports, so failures here are expected and ignored. */
 static const char *const MIGRATIONS[] = {
     "ALTER TABLE versions ADD COLUMN cover TEXT",
+    "ALTER TABLE versions ADD COLUMN source_path TEXT",
+    "ALTER TABLE games ADD COLUMN discovered INTEGER NOT NULL DEFAULT 0",
+    "CREATE TABLE IF NOT EXISTS discovered ("
+    "  folder      TEXT PRIMARY KEY,"
+    "  game_id     TEXT NOT NULL,"
+    "  fingerprint TEXT NOT NULL,"
+    "  version     TEXT NOT NULL,"
+    "  updated_at  INTEGER NOT NULL"
+    ")",
 };
 
 int
@@ -377,6 +386,249 @@ vapord_game_delete(sqlite3 *db, const char *game_id)
     }
     changes = sqlite3_changes(db);
     return changes > 0 ? 0 : 1;
+}
+
+int
+vapord_game_mark_discovered(sqlite3 *db, const char *game_id, int discovered)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (sqlite3_prepare_v2(db, "UPDATE games SET discovered = ? WHERE id = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_int(st, 1, discovered ? 1 : 0);
+    sqlite3_bind_text(st, 2, game_id, -1, SQLITE_STATIC);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_game_lookup(sqlite3 *db, const char *game_id, int *discovered)
+{
+    sqlite3_stmt *st = NULL;
+    int           found = 0;
+
+    if (discovered) {
+        *discovered = 0;
+    }
+    if (sqlite3_prepare_v2(db, "SELECT discovered FROM games WHERE id = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        if (discovered) {
+            *discovered = sqlite3_column_int(st, 0);
+        }
+        found = 1;
+    }
+    sqlite3_finalize(st);
+    return found ? 0 : 1;
+}
+
+int
+vapord_version_set_source(sqlite3 *db, const char *game_id, const char *version,
+                          const char *source_rel)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (sqlite3_prepare_v2(db,
+                           "UPDATE versions SET source_path = ? WHERE game_id = ?"
+                           " AND version = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    if (source_rel && *source_rel) {
+        sqlite3_bind_text(st, 1, source_rel, -1, SQLITE_STATIC);
+    } else {
+        sqlite3_bind_null(st, 1);
+    }
+    sqlite3_bind_text(st, 2, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, version, -1, SQLITE_STATIC);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_version_source(sqlite3 *db, const char *game_id, const char *version,
+                      char *out, size_t outsz)
+{
+    sqlite3_stmt *st = NULL;
+    int           found = 0;
+
+    out[0] = '\0';
+    if (sqlite3_prepare_v2(db,
+                           "SELECT source_path FROM versions"
+                           " WHERE game_id = ? AND version = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, version, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *p = (const char *)sqlite3_column_text(st, 0);
+        if (p && *p) {
+            snprintf(out, outsz, "%s", p);
+            found = 1;
+        }
+    }
+    sqlite3_finalize(st);
+    return found ? 0 : 1;
+}
+
+int
+vapord_discovered_get(sqlite3 *db, const char *folder, vapord_discovered_row *out)
+{
+    sqlite3_stmt *st = NULL;
+    int           found = 0;
+
+    memset(out, 0, sizeof(*out));
+    if (sqlite3_prepare_v2(db,
+                           "SELECT folder, game_id, fingerprint, version"
+                           " FROM discovered WHERE folder = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, folder, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *f = (const char *)sqlite3_column_text(st, 0);
+        const char *id = (const char *)sqlite3_column_text(st, 1);
+        const char *fp = (const char *)sqlite3_column_text(st, 2);
+        const char *ver = (const char *)sqlite3_column_text(st, 3);
+        snprintf(out->folder, sizeof(out->folder), "%s", f ? f : "");
+        snprintf(out->game_id, sizeof(out->game_id), "%s", id ? id : "");
+        snprintf(out->fingerprint, sizeof(out->fingerprint), "%s", fp ? fp : "");
+        snprintf(out->version, sizeof(out->version), "%s", ver ? ver : "");
+        found = 1;
+    }
+    sqlite3_finalize(st);
+    return found ? 0 : 1;
+}
+
+int
+vapord_discovered_put(sqlite3 *db, const vapord_discovered_row *row)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO discovered (folder, game_id, fingerprint,"
+                           "   version, updated_at)"
+                           " VALUES (?, ?, ?, ?, ?)"
+                           " ON CONFLICT(folder) DO UPDATE SET"
+                           "   game_id = excluded.game_id,"
+                           "   fingerprint = excluded.fingerprint,"
+                           "   version = excluded.version,"
+                           "   updated_at = excluded.updated_at",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, row->folder, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, row->game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, row->fingerprint, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, row->version, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 5, vapor_now_unix());
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_discovered_delete(sqlite3 *db, const char *folder)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (sqlite3_prepare_v2(db, "DELETE FROM discovered WHERE folder = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, folder, -1, SQLITE_STATIC);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_discovered_list(sqlite3 *db, vapord_discovered_row **out, size_t *count)
+{
+    sqlite3_stmt         *st = NULL;
+    vapord_discovered_row *rows = NULL;
+    size_t                n = 0, cap = 0;
+
+    *out = NULL;
+    *count = 0;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT folder, game_id, fingerprint, version FROM discovered",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *f = (const char *)sqlite3_column_text(st, 0);
+        const char *id = (const char *)sqlite3_column_text(st, 1);
+        const char *fp = (const char *)sqlite3_column_text(st, 2);
+        const char *ver = (const char *)sqlite3_column_text(st, 3);
+
+        if (n == cap) {
+            size_t newcap = cap ? cap * 2 : 8;
+            vapord_discovered_row *grown =
+                (vapord_discovered_row *)realloc(rows, newcap * sizeof(*grown));
+            if (!grown) {
+                free(rows);
+                sqlite3_finalize(st);
+                return -1;
+            }
+            rows = grown;
+            cap = newcap;
+        }
+        memset(&rows[n], 0, sizeof(rows[n]));
+        snprintf(rows[n].folder, sizeof(rows[n].folder), "%s", f ? f : "");
+        snprintf(rows[n].game_id, sizeof(rows[n].game_id), "%s", id ? id : "");
+        snprintf(rows[n].fingerprint, sizeof(rows[n].fingerprint), "%s",
+                 fp ? fp : "");
+        snprintf(rows[n].version, sizeof(rows[n].version), "%s", ver ? ver : "");
+        n++;
+    }
+    sqlite3_finalize(st);
+    *out = rows;
+    *count = n;
+    return 0;
+}
+
+int
+vapord_discovered_by_id(sqlite3 *db, const char *game_id, char *folder,
+                        size_t foldersz)
+{
+    sqlite3_stmt *st = NULL;
+    int           found = 0;
+
+    folder[0] = '\0';
+    if (sqlite3_prepare_v2(db, "SELECT folder FROM discovered WHERE game_id = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *f = (const char *)sqlite3_column_text(st, 0);
+        snprintf(folder, foldersz, "%s", f ? f : "");
+        found = 1;
+    }
+    sqlite3_finalize(st);
+    return found ? 0 : 1;
 }
 
 /* SQLite cannot order "1.10" after "1.9", so versions are compared in C. */

@@ -85,14 +85,28 @@ vapord_route_download(vapord *app, struct mg_connection *c, const char *method,
     }
     free(manifest_json);
 
-    if (vapord_content_path(&app->cfg, game_id, version, m.package.file,
-                            path, sizeof(path))
-        != 0) {
-        vapor_manifest_free(&m);
-        return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL,
-                                  "could not resolve package path");
+    {
+        char source[VAPORD_PATH_MAX];
+        int  have_source = vapord_version_source(app->db, game_id, version,
+                                                source, sizeof(source));
+
+        if (have_source == 0) {
+            vapor_manifest_free(&m);
+            if (vapord_library_resolve(&app->cfg, source, path, sizeof(path))
+                != 0) {
+                return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL,
+                                          "could not resolve library file");
+            }
+        } else if (vapord_content_path(&app->cfg, game_id, version, m.package.file,
+                                       path, sizeof(path))
+                   != 0) {
+            vapor_manifest_free(&m);
+            return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL,
+                                      "could not resolve package path");
+        } else {
+            vapor_manifest_free(&m);
+        }
     }
-    vapor_manifest_free(&m);
 
     VLOG_INFO("user %lld downloading %s/%s", (long long)user_id, game_id, version);
 

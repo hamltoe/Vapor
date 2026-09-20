@@ -46,11 +46,45 @@ install_dir_for(vapor_client *vc, const char *game_id, char *out, size_t outsz)
 
 static int
 cache_path_for(vapor_client *vc, const char *game_id, const char *version,
-               char *out, size_t outsz)
+               const char *package_file, char *out, size_t outsz)
 {
-    int n = snprintf(out, outsz, "%s/%s/cache/%s-%s.zip", vc->cfg.library_dir,
-                     VAPOR_META_DIR, game_id, version);
+    const char *file = (package_file && *package_file) ? package_file : "package.bin";
+    int n = snprintf(out, outsz, "%s/%s/cache/%s-%s-%s", vc->cfg.library_dir,
+                     VAPOR_META_DIR, game_id, version, file);
     return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
+
+static int
+copy_file(const char *src, const char *dst)
+{
+    FILE  *in, *out;
+    char   buf[64 * 1024];
+    size_t n;
+    int    rc = 0;
+
+    in = fopen(src, "rb");
+    if (!in) {
+        return -1;
+    }
+    out = fopen(dst, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            rc = -1;
+            break;
+        }
+    }
+    if (ferror(in)) {
+        rc = -1;
+    }
+    fclose(in);
+    if (fclose(out) != 0) {
+        rc = -1;
+    }
+    return rc;
 }
 
 /* --------------------------------------------------------------- manifest */
@@ -380,6 +414,259 @@ apply_exec_bits(vapor_client *vc, const char *install_dir,
     return 0;
 }
 
+static int
+path_depth(const char *rel)
+{
+    int n = 0;
+    for (; *rel; rel++) {
+        if (*rel == '/') {
+            n++;
+        }
+    }
+    return n;
+}
+
+static const char *
+path_basename(const char *path)
+{
+    const char *s = strrchr(path, '/');
+#if defined(_WIN32)
+    {
+        const char *b = strrchr(path, '\\');
+        if (b > s) {
+            s = b;
+        }
+    }
+#endif
+    return s ? s + 1 : path;
+}
+
+static int
+looks_iso_name(const char *name)
+{
+    return vapor_str_ends_with_ci(name, ".iso")
+        || vapor_str_ends_with_ci(name, ".img");
+}
+
+static int
+is_junk_exec(const char *base)
+{
+    static const char *const junk[] = {
+        "setup.exe", "install.exe", "installer.exe", "unins000.exe",
+        "uninstall.exe", "dxsetup.exe", "vcredist", "vc_redist",
+        "unitycrashhandler", "crashreporter", "easyanticheat",
+        "dotnetfx", NULL
+    };
+    size_t i;
+
+    for (i = 0; junk[i]; i++) {
+        if (vapor_str_eq_ci(base, junk[i])
+            || vapor_str_has_prefix(base, junk[i])) {
+            return 1;
+        }
+    }
+    if (vapor_str_has_prefix(base, "unins")
+        && vapor_str_ends_with_ci(base, ".exe")) {
+        return 1;
+    }
+    return 0;
+}
+
+static int
+looks_windows_exec(const char *name)
+{
+    return vapor_str_ends_with_ci(name, ".exe");
+}
+
+static int
+looks_linux_exec_name(const char *name)
+{
+    const char *dot;
+
+    if (vapor_str_ends_with_ci(name, ".sh")
+        || vapor_str_ends_with_ci(name, ".x86_64")
+        || vapor_str_ends_with_ci(name, ".x86")
+        || vapor_str_ends_with_ci(name, ".bin")) {
+        return 1;
+    }
+    if (vapor_str_ends_with_ci(name, ".dll")
+        || vapor_str_ends_with_ci(name, ".so")
+        || vapor_str_ends_with_ci(name, ".dylib")
+        || vapor_str_ends_with_ci(name, ".exe")
+        || vapor_str_ends_with_ci(name, ".bat")
+        || vapor_str_ends_with_ci(name, ".cmd")
+        || vapor_str_ends_with_ci(name, ".png")
+        || vapor_str_ends_with_ci(name, ".jpg")
+        || vapor_str_ends_with_ci(name, ".json")
+        || vapor_str_ends_with_ci(name, ".txt")
+        || vapor_str_ends_with_ci(name, ".xml")) {
+        return 0;
+    }
+    dot = strrchr(name, '.');
+    return dot == NULL;
+}
+
+static int
+is_elf_file(const char *path)
+{
+    FILE          *f;
+    unsigned char  mag[4];
+
+    f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+    if (fread(mag, 1, 4, f) != 4) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    return mag[0] == 0x7f && mag[1] == 'E' && mag[2] == 'L' && mag[3] == 'F';
+}
+
+typedef struct {
+    char win_exec[VAPOR_PATH_MAX];
+    char lin_exec[VAPOR_PATH_MAX];
+    int  win_score;
+    int  lin_score;
+    int  junk_ok;
+    int  has_iso;
+    char iso_rel[VAPOR_PATH_MAX];
+} install_scan;
+
+static int
+scan_install_cb(const char *rel, const char *abs, void *ud)
+{
+    install_scan *s = ud;
+    const char   *base = path_basename(rel);
+    int           score;
+
+    if (looks_iso_name(base)) {
+        s->has_iso = 1;
+        if (!s->iso_rel[0]) {
+            snprintf(s->iso_rel, sizeof(s->iso_rel), "%s", rel);
+        }
+        return 0;
+    }
+
+    if (!s->junk_ok && is_junk_exec(base)) {
+        return 0;
+    }
+    score = 200 - path_depth(rel) * 15;
+    if (looks_windows_exec(base) && score > s->win_score) {
+        snprintf(s->win_exec, sizeof(s->win_exec), "%s", rel);
+        s->win_score = score;
+    } else if (looks_linux_exec_name(base)
+               && (is_elf_file(abs) || vapor_str_ends_with_ci(base, ".sh"))
+               && score > s->lin_score) {
+        snprintf(s->lin_exec, sizeof(s->lin_exec), "%s", rel);
+        s->lin_score = score;
+    }
+    return 0;
+}
+
+static int
+add_discovered_target(vapor_manifest *m, const char *platform, const char *exec)
+{
+    vapor_target *grown;
+    vapor_target *t;
+
+    grown = (vapor_target *)realloc(m->targets,
+                                    (m->ntargets + 1) * sizeof(*grown));
+    if (!grown) {
+        return -1;
+    }
+    m->targets = grown;
+    t = &m->targets[m->ntargets];
+    memset(t, 0, sizeof(*t));
+    t->platform = vapor_strdup(platform);
+    t->arch = vapor_strdup("x86_64");
+    t->exec = vapor_strdup(exec);
+    if (!t->platform || !t->arch || !t->exec) {
+        return -1;
+    }
+    if (strcmp(platform, "linux") == 0) {
+        t->exec_bits = (char **)calloc(1, sizeof(*t->exec_bits));
+        if (!t->exec_bits) {
+            return -1;
+        }
+        t->exec_bits[0] = vapor_strdup(exec);
+        if (!t->exec_bits[0]) {
+            return -1;
+        }
+        t->nexec_bits = 1;
+    }
+    m->ntargets++;
+    return 0;
+}
+
+static int
+discover_install_content(vapor_client *vc, const char *install_dir,
+                         vapor_manifest *m, int *out_has_iso, char *iso_rel,
+                         size_t isosz)
+{
+    install_scan scan;
+
+    memset(&scan, 0, sizeof(scan));
+    scan.win_score = -1;
+    scan.lin_score = -1;
+    if (vapor_plat_walk_files(install_dir, scan_install_cb, &scan) != 0) {
+        vapor_client_set_error(vc, "cannot inspect extracted files in %s",
+                               install_dir);
+        return -1;
+    }
+    if (!scan.win_exec[0] && !scan.lin_exec[0] && !scan.has_iso) {
+        scan.junk_ok = 1;
+        scan.win_score = scan.lin_score = -1;
+        if (vapor_plat_walk_files(install_dir, scan_install_cb, &scan) != 0) {
+            vapor_client_set_error(vc, "cannot inspect extracted files in %s",
+                                   install_dir);
+            return -1;
+        }
+    }
+
+    *out_has_iso = scan.has_iso;
+    if (iso_rel && isosz) {
+        snprintf(iso_rel, isosz, "%s", scan.iso_rel);
+    }
+
+    if (m->ntargets == 0) {
+        if (scan.win_exec[0]
+            && add_discovered_target(m, "windows", scan.win_exec) != 0) {
+            vapor_client_set_error(vc, "out of memory");
+            return -1;
+        }
+        if (scan.lin_exec[0]
+            && add_discovered_target(m, "linux", scan.lin_exec) != 0) {
+            vapor_client_set_error(vc, "out of memory");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int
+tree_has_iso_cb(const char *rel, const char *abs, void *ud)
+{
+    int *found = (int *)ud;
+
+    (void)abs;
+    if (looks_iso_name(path_basename(rel))) {
+        *found = 1;
+        return 1;
+    }
+    return 0;
+}
+
+static int
+install_tree_has_iso(const char *install_dir)
+{
+    int found = 0;
+
+    vapor_plat_walk_files(install_dir, tree_has_iso_cb, &found);
+    return found;
+}
+
 /* ---------------------------------------------------------------- install */
 
 int
@@ -390,7 +677,7 @@ vapor_install_game(vapor_client *vc, const char *game_id, const char *version,
     vapor_manifest      m;
     vapor_install       rec, existing;
     vapor_install_opts  defaults;
-    const vapor_target *target;
+    const vapor_target *target = NULL;
     char                install_dir[VAPOR_PATH_MAX];
     char                cache_dir[VAPOR_PATH_MAX];
     char                zip_path[VAPOR_PATH_MAX];
@@ -399,6 +686,8 @@ vapor_install_game(vapor_client *vc, const char *game_id, const char *version,
     uint64_t            on_disk = 0, size = 0;
     size_t              nfiles = 0, nexec = 0;
     int                 have_existing, rc = -1;
+    int                 has_iso = 0;
+    char                iso_rel[VAPOR_PATH_MAX] = "";
 
     if (!opts) {
         memset(&defaults, 0, sizeof(defaults));
@@ -406,18 +695,6 @@ vapor_install_game(vapor_client *vc, const char *game_id, const char *version,
     }
 
     if (vapor_fetch_manifest(vc, game_id, version, &m) != 0) {
-        return -1;
-    }
-
-    /* Refuse early if there is nothing runnable here, rather than after a
-     * multi-gigabyte download. */
-    target = vapor_manifest_pick_target(&m, vapor_host_platform(),
-                                        vapor_host_arch());
-    if (!target) {
-        vapor_client_set_error(vc,
-                               "%s %s has no %s/%s build", m.id, m.version,
-                               vapor_host_platform(), vapor_host_arch());
-        vapor_manifest_free(&m);
         return -1;
     }
 
@@ -430,7 +707,9 @@ vapor_install_game(vapor_client *vc, const char *game_id, const char *version,
     }
 
     if (install_dir_for(vc, m.id, install_dir, sizeof(install_dir)) != 0
-        || cache_path_for(vc, m.id, m.version, zip_path, sizeof(zip_path)) != 0) {
+        || cache_path_for(vc, m.id, m.version, m.package.file, zip_path,
+                         sizeof(zip_path))
+               != 0) {
         vapor_manifest_free(&m);
         return -1;
     }
@@ -519,14 +798,53 @@ verified:
         return -1;
     }
 
-    if (extract_archive(vc, zip_path, install_dir, m.package.strip_prefix,
-                        &nfiles)
+    if (!m.package.format || strcmp(m.package.format, "zip") == 0) {
+        if (extract_archive(vc, zip_path, install_dir, m.package.strip_prefix,
+                            &nfiles)
+            != 0) {
+            vapor_plat_remove_tree(install_dir);
+            vapor_manifest_free(&m);
+            return -1;
+        }
+    } else {
+        char dest[VAPOR_PATH_MAX];
+        if (join(dest, sizeof(dest), install_dir, m.package.file) != 0) {
+            vapor_client_set_error(vc, "install path is too long");
+            vapor_plat_remove_tree(install_dir);
+            vapor_manifest_free(&m);
+            return -1;
+        }
+        vapor_plat_native_path(dest);
+        if (copy_file(zip_path, dest) != 0) {
+            vapor_client_set_error(vc, "cannot copy %s into the install directory",
+                                   m.package.file);
+            vapor_plat_remove_tree(install_dir);
+            vapor_manifest_free(&m);
+            return -1;
+        }
+        nfiles = 1;
+    }
+
+    if (discover_install_content(vc, install_dir, &m, &has_iso, iso_rel,
+                                 sizeof(iso_rel))
         != 0) {
         vapor_plat_remove_tree(install_dir);
         vapor_manifest_free(&m);
         return -1;
     }
-    if (apply_exec_bits(vc, install_dir, target, &nexec) != 0) {
+    target = vapor_manifest_pick_target(&m, vapor_host_platform(),
+                                        vapor_host_arch());
+    if (target) {
+        if (apply_exec_bits(vc, install_dir, target, &nexec) != 0) {
+            vapor_plat_remove_tree(install_dir);
+            vapor_manifest_free(&m);
+            return -1;
+        }
+    } else if (!has_iso) {
+        vapor_client_set_error(vc,
+                               "%s %s has no %s/%s build and no disc image",
+                               m.id, m.version, vapor_host_platform(),
+                               vapor_host_arch());
         vapor_plat_remove_tree(install_dir);
         vapor_manifest_free(&m);
         return -1;
@@ -564,6 +882,12 @@ verified:
         printf("  contents ... %zu file(s), %s\n", nfiles, pretty);
         if (nexec > 0) {
             printf("  exec bits .. %zu file(s) made executable\n", nexec);
+        }
+        if (has_iso) {
+            printf("  disc image . %s\n", iso_rel[0] ? iso_rel : "(found)");
+        }
+        if (!target && has_iso) {
+            printf("  launch ..... disc image (no native executable)\n");
         }
         if (have_existing && strcmp(existing.version, m.version) != 0) {
             printf("  upgraded ... from %s\n", existing.version);
@@ -645,9 +969,13 @@ vapor_verify_install(vapor_client *vc, const char *game_id)
 
     t = vapor_manifest_pick_target(&m, vapor_host_platform(), vapor_host_arch());
     if (!t) {
-        printf("  no %s/%s target in the manifest\n", vapor_host_platform(),
-               vapor_host_arch());
-        problems++;
+        if (install_tree_has_iso(install_dir)) {
+            printf("  disc image (no launch target)\n");
+        } else {
+            printf("  no %s/%s target in the manifest\n", vapor_host_platform(),
+                   vapor_host_arch());
+            problems++;
+        }
     } else if (join(exec_path, sizeof(exec_path), install_dir, t->exec) != 0) {
         printf("  the launch target path is too long\n");
         problems++;

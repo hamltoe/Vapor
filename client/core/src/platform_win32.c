@@ -227,6 +227,86 @@ vapor_plat_chmod_matching(const char *root, const char *pattern, size_t *count)
     return 0;
 }
 
+static int
+skip_walk_name(const char *name)
+{
+    return name[0] == '.' || strcmp(name, "__MACOSX") == 0;
+}
+
+static int
+walk_files(const char *root, const char *rel, vapor_plat_walk_fn fn, void *ud)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE           h;
+    char             pattern[VAPOR_WIN_PATH];
+    char             abs[VAPOR_WIN_PATH];
+    int              rc = 0;
+
+    if (rel[0]) {
+        if ((size_t)snprintf(abs, sizeof(abs), "%s/%s", root, rel)
+            >= sizeof(abs)) {
+            return -1;
+        }
+        vapor_plat_native_path(abs);
+        if ((size_t)snprintf(pattern, sizeof(pattern), "%s\\*", abs)
+            >= sizeof(pattern)) {
+            return -1;
+        }
+    } else if ((size_t)snprintf(pattern, sizeof(pattern), "%s\\*", root)
+               >= sizeof(pattern)) {
+        return -1;
+    }
+
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+    do {
+        char child_rel[VAPOR_WIN_PATH];
+        char child_abs[VAPOR_WIN_PATH];
+
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) {
+            continue;
+        }
+        if (skip_walk_name(fd.cFileName)) {
+            continue;
+        }
+        if ((size_t)snprintf(child_rel, sizeof(child_rel), "%s%s%s", rel,
+                             *rel ? "/" : "", fd.cFileName)
+            >= sizeof(child_rel)) {
+            continue;
+        }
+        if ((size_t)snprintf(child_abs, sizeof(child_abs), "%s/%s", root,
+                             child_rel)
+            >= sizeof(child_abs)) {
+            continue;
+        }
+        vapor_plat_native_path(child_abs);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            rc = walk_files(root, child_rel, fn, ud);
+            if (rc != 0) {
+                break;
+            }
+            continue;
+        }
+        rc = fn(child_rel, child_abs, ud);
+        if (rc != 0) {
+            break;
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return rc;
+}
+
+int
+vapor_plat_walk_files(const char *root, vapor_plat_walk_fn fn, void *ud)
+{
+    if (!root || !fn) {
+        return -1;
+    }
+    return walk_files(root, "", fn, ud);
+}
+
 void
 vapor_plat_native_path(char *path)
 {

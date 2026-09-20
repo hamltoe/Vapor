@@ -39,6 +39,43 @@ vapor_id_is_valid(const char *id)
 }
 
 int
+vapor_id_slug(const char *name, char *out, size_t outsz)
+{
+    size_t i, o = 0;
+    int    pending_dash = 0;
+
+    if (!name || !out || outsz < 2) {
+        return -1;
+    }
+
+    for (i = 0; name[i] != '\0' && o < VAPOR_ID_MAX && o + 1 < outsz; i++) {
+        unsigned char ch = (unsigned char)name[i];
+        char          lower = (char)tolower(ch);
+
+        if ((lower >= 'a' && lower <= 'z') || (lower >= '0' && lower <= '9')) {
+            if (pending_dash && o > 0 && o < VAPOR_ID_MAX && o + 1 < outsz) {
+                out[o++] = '-';
+            }
+            pending_dash = 0;
+            if (o < VAPOR_ID_MAX && o + 1 < outsz) {
+                out[o++] = lower;
+            }
+        } else if (o > 0) {
+            pending_dash = 1;
+        }
+    }
+    out[o] = '\0';
+
+    if (o == 0) {
+        if (outsz < 5) {
+            return -1;
+        }
+        memcpy(out, "game", 5);
+    }
+    return vapor_id_is_valid(out) ? 0 : -1;
+}
+
+int
 vapor_username_is_valid(const char *username)
 {
     size_t i, n;

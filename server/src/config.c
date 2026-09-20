@@ -23,7 +23,9 @@ vapord_config_defaults(vapord_config *c)
     c->num_threads = 8;
     snprintf(c->bind_addr, sizeof(c->bind_addr), "0.0.0.0");
     snprintf(c->content_root, sizeof(c->content_root), "/srv/vapor/content");
+    c->library_root[0] = '\0';
     snprintf(c->db_path, sizeof(c->db_path), "/var/lib/vapor/vapor.db");
+    c->discover_interval = 60;
 }
 
 static char *
@@ -99,6 +101,16 @@ vapord_config_load(vapord_config *c, const char *path, char *err, size_t errsz)
             snprintf(c->bind_addr, sizeof(c->bind_addr), "%s", val);
         } else if (strcmp(key, "content_root") == 0) {
             snprintf(c->content_root, sizeof(c->content_root), "%s", val);
+        } else if (strcmp(key, "library_root") == 0) {
+            snprintf(c->library_root, sizeof(c->library_root), "%s", val);
+        } else if (strcmp(key, "discover_interval") == 0) {
+            c->discover_interval = atoi(val);
+            if (c->discover_interval < 0 || c->discover_interval > 86400) {
+                snprintf(err, errsz, "%s:%d: discover_interval out of range",
+                         path, lineno);
+                fclose(f);
+                return -1;
+            }
         } else if (strcmp(key, "db_path") == 0) {
             snprintf(c->db_path, sizeof(c->db_path), "%s", val);
         } else if (strcmp(key, "enable_registration") == 0) {
@@ -130,6 +142,10 @@ vapord_config_load(vapord_config *c, const char *path, char *err, size_t errsz)
         while (n > 1 && (c->content_root[n - 1] == '/' || c->content_root[n - 1] == '\\')) {
             c->content_root[--n] = '\0';
         }
+        n = strlen(c->library_root);
+        while (n > 1 && (c->library_root[n - 1] == '/' || c->library_root[n - 1] == '\\')) {
+            c->library_root[--n] = '\0';
+        }
     }
     return 0;
 }
@@ -139,6 +155,16 @@ vapord_config_print(const vapord_config *c)
 {
     printf("  bind ............. %s:%d\n", c->bind_addr, c->port);
     printf("  content_root ..... %s\n", c->content_root);
+    if (c->library_root[0]) {
+        printf("  library_root ..... %s\n", c->library_root);
+        if (c->discover_interval > 0) {
+            printf("  discover ......... every %d s\n", c->discover_interval);
+        } else {
+            printf("  discover ......... once at startup\n");
+        }
+    } else {
+        printf("  library_root ..... (disabled)\n");
+    }
     printf("  db_path .......... %s\n", c->db_path);
     printf("  registration ..... %s\n", c->enable_registration ? "open" : "closed");
     printf("  threads .......... %d\n", c->num_threads);

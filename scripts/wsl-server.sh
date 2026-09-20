@@ -12,6 +12,7 @@ if [ -n "${VAPOR_ROOT:-}" ]; then
 fi
 bin="${root}/build-linux/bin/vapord"
 data="${VAPOR_SERVER_DIR:-${HOME}/vapor}"
+library="${VAPOR_LIBRARY_DIR:-${data}/library}"
 port="${VAPOR_PORT:-8777}"
 pidfile="${data}/vapord.pid"
 logfile="${data}/vapord.log"
@@ -37,6 +38,7 @@ cmd_status() {
     if pid="$(running_pid)"; then
         echo "vapord is running (pid ${pid})"
         echo "  bind ........ 0.0.0.0:${port}"
+        echo "  library ..... ${library}"
         echo "  content ..... ${data}/content"
         echo "  database .... ${data}/vapor.db"
         echo "  log ......... ${logfile}"
@@ -76,7 +78,7 @@ cmd_start() {
         echo "build it in WSL with: bash scripts/bootstrap-linux.sh --server-only && bash scripts/build-linux.sh" >&2
         exit 1
     fi
-    mkdir -p "${data}/content"
+    mkdir -p "${data}/content" "${library}"
 
     local pid
     if pid="$(running_pid)"; then
@@ -94,6 +96,7 @@ cmd_start() {
 
     nohup "${bin}" -H 0.0.0.0 -p "${port}" \
         -r "${data}/content" \
+        -L "${library}" \
         -d "${data}/vapor.db" \
         >>"${logfile}" 2>&1 &
     echo $! >"${pidfile}"
@@ -104,6 +107,7 @@ cmd_start() {
             echo "vapord ${port} is up"
             echo "  Windows client: vapor config server http://127.0.0.1:${port}"
             echo "  data .......... ${data}"
+            echo "  library ....... ${library}"
             return 0
         fi
         sleep 0.1

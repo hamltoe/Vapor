@@ -245,6 +245,80 @@ vapor_plat_chmod_matching(const char *root, const char *pattern, size_t *count)
     return chmod_matching_walk(root, "", pattern, count);
 }
 
+static int
+skip_walk_name(const char *name)
+{
+    return name[0] == '.' || strcmp(name, "__MACOSX") == 0;
+}
+
+static int
+walk_files(const char *root, const char *rel, vapor_plat_walk_fn fn, void *ud)
+{
+    char           abs[4096];
+    DIR           *d;
+    struct dirent *ent;
+    int            rc = 0;
+
+    if ((size_t)snprintf(abs, sizeof(abs), "%s%s%s", root, *rel ? "/" : "", rel)
+        >= sizeof(abs)) {
+        return -1;
+    }
+    d = opendir(abs);
+    if (!d) {
+        return -1;
+    }
+
+    while ((ent = readdir(d)) != NULL) {
+        char        child_rel[4096];
+        char        child_abs[4096];
+        struct stat st;
+
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        if (skip_walk_name(ent->d_name)) {
+            continue;
+        }
+        if ((size_t)snprintf(child_rel, sizeof(child_rel), "%s%s%s", rel,
+                             *rel ? "/" : "", ent->d_name)
+            >= sizeof(child_rel)) {
+            continue;
+        }
+        if ((size_t)snprintf(child_abs, sizeof(child_abs), "%s/%s", root,
+                             child_rel)
+            >= sizeof(child_abs)) {
+            continue;
+        }
+        if (lstat(child_abs, &st) != 0) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            rc = walk_files(root, child_rel, fn, ud);
+            if (rc != 0) {
+                break;
+            }
+            continue;
+        }
+        if (S_ISREG(st.st_mode)) {
+            rc = fn(child_rel, child_abs, ud);
+            if (rc != 0) {
+                break;
+            }
+        }
+    }
+    closedir(d);
+    return rc;
+}
+
+int
+vapor_plat_walk_files(const char *root, vapor_plat_walk_fn fn, void *ud)
+{
+    if (!root || !fn) {
+        return -1;
+    }
+    return walk_files(root, "", fn, ud);
+}
+
 int
 vapor_plat_run(const char *exec, char *const argv[], const char *cwd,
                const vapor_kv *env, size_t nenv, int *out_exit)

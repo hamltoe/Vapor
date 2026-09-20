@@ -133,6 +133,27 @@ test_id_validation(void)
 }
 
 static void
+test_id_slug(void)
+{
+    char id[VAPOR_ID_MAX + 1];
+
+    puts("id_slug");
+    check(vapor_id_slug("Hollow Knight", id, sizeof(id)) == 0
+              && strcmp(id, "hollow-knight") == 0,
+          "spaces to dashes");
+    check(vapor_id_slug("Call of Duty: MW2", id, sizeof(id)) == 0
+              && strcmp(id, "call-of-duty-mw2") == 0,
+          "punctuation collapsed");
+    check(vapor_id_slug("Game", id, sizeof(id)) == 0 && strcmp(id, "game") == 0,
+          "lowercase");
+    check(vapor_id_slug("  --  ", id, sizeof(id)) == 0 && strcmp(id, "game") == 0,
+          "empty after strip becomes game");
+    check(vapor_id_slug("123", id, sizeof(id)) == 0 && strcmp(id, "123") == 0,
+          "digits kept");
+    check(vapor_id_is_valid(id), "slug is a valid id");
+}
+
+static void
 test_username_validation(void)
 {
     puts("username_is_valid");
@@ -281,6 +302,34 @@ test_manifest_roundtrip(void)
                                    sizeof(err))
                   != 0,
               "rejects traversal in cover");
+        {
+            static const char *iso_empty =
+                "{\"schema\":1,\"id\":\"ok\",\"name\":\"x\",\"version\":\"1\","
+                "\"package\":{\"file\":\"disc.iso\",\"format\":\"iso\",\"size\":1,"
+                "\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca4"
+                "95991b7852b855\"},\"targets\":[]}";
+            static const char *zip_empty =
+                "{\"schema\":1,\"id\":\"ok\",\"name\":\"x\",\"version\":\"1\","
+                "\"package\":{\"file\":\"package.zip\",\"format\":\"zip\",\"size\":1,"
+                "\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca4"
+                "95991b7852b855\"},\"targets\":[]}";
+            if (vapor_manifest_parse(iso_empty, strlen(iso_empty), &m, err,
+                                     sizeof(err))
+                == 0) {
+                check(m.ntargets == 0, "iso may have no targets");
+                vapor_manifest_free(&m);
+            } else {
+                check(0, "iso may have no targets");
+            }
+            if (vapor_manifest_parse(zip_empty, strlen(zip_empty), &m, err,
+                                     sizeof(err))
+                == 0) {
+                check(m.ntargets == 0, "zip may have no targets");
+                vapor_manifest_free(&m);
+            } else {
+                check(0, "zip may have no targets");
+            }
+        }
     }
 }
 
@@ -293,6 +342,7 @@ main(void)
     test_sha256();
     test_version_cmp();
     test_id_validation();
+    test_id_slug();
     test_username_validation();
     test_glob();
     test_buf();

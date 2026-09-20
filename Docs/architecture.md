@@ -11,12 +11,16 @@ layer and HTTP transport differ.
   │                     │                           │
   │                     ├── SQLite  users, tokens,  │
   │                     │           games, versions │
+  │                     ├── library_root            │
+  │                     │     <Game Title>/         │
+  │                     │       *.zip | *.iso       │
+  │                     │       or unpacked files   │
   │                     └── content_root            │
   │                           <id>/<version>/       │
   │                             package.zip         │
   │                             manifest.json       │
   │                             cover.png           │
-  │  vapor-admin ──► same SQLite + content_root     │
+  │  vapor-admin ──► same SQLite, library, content  │
   └─────────────────────────────────────────────────┘
                          ▲
             HTTPS JSON + ranged GET
@@ -108,12 +112,22 @@ folder. `vapor config library PATH` points it at a larger drive.
 Defaults in `deploy/vapord.conf`:
 
 ```
+library_root = /srv/vapor/library
 content_root = /srv/vapor/content
 db_path      = /var/lib/vapor/vapor.db
 ```
 
-Content layout is `<content_root>/<game_id>/<version>/`. Every path segment
-is validated; a hostile id or version cannot walk out of the root.
+`library_root` is the drop folder vapord scans. Each immediate
+subdirectory is one game. Discovery runs at startup and then every
+`discover_interval` seconds (default 60; 0 means once). Unchanged
+folders are fingerprint-skipped so large archives are not re-hashed.
+
+Zip files already sitting in `library_root` are served in place.
+ISO files are stored (not deflated) into
+`<content_root>/<game_id>/<version>/package.zip`; the original disc image
+is left in the drop folder. Folders of loose files are zipped into the
+same content path. Every path segment is validated
+so a hostile id or version cannot walk out of the root.
 
 Accounts live only in the server SQLite `users` table (username, Argon2id
 hash, admin flag, created_at). The client never creates a local user; it

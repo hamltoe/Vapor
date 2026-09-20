@@ -45,9 +45,9 @@ On Linux, in two terminals:
 ```
 # server
 ./build-linux/bin/vapord -H 127.0.0.1 -p 8777 \
-    -r ./run/content -d ./run/vapor.db
+    -r ./run/content -L ./run/library -d ./run/vapor.db
 
-# ingest a folder that already has a launchable binary
+# drop a game folder into ./run/library, or ingest by hand:
 ./build-linux/bin/vapor-admin -r ./run/content -d ./run/vapor.db add ./mygame \
     --id my-game --name "My Game" --version 1.0.0 \
     --linux-exec game --cover ./art/cover.png
@@ -84,16 +84,17 @@ Recommended layout on the Linux host:
 | `/usr/local/bin/vapor-admin` | Ingest tool |
 | `/etc/vapor/vapord.conf` | Copied from `deploy/vapord.conf` |
 | `/var/lib/vapor/vapor.db` | Catalog and accounts |
-| `/srv/vapor/content` | Archives and cover art |
+| `/srv/vapor/library` | Drop folder: one subdirectory per game |
+| `/srv/vapor/content` | Packaged archives and cover art |
 
 Create a dedicated user, then install the unit:
 
 ```
 sudo useradd --system --home /var/lib/vapor --shell /usr/sbin/nologin vapor
-sudo mkdir -p /etc/vapor /var/lib/vapor /srv/vapor/content
+sudo mkdir -p /etc/vapor /var/lib/vapor /srv/vapor/content /srv/vapor/library
 sudo cp deploy/vapord.conf /etc/vapor/vapord.conf
 sudo cp deploy/vapord.service /etc/systemd/system/
-sudo chown -R vapor:vapor /var/lib/vapor /srv/vapor/content
+sudo chown -R vapor:vapor /var/lib/vapor /srv/vapor/content /srv/vapor/library
 sudo systemctl daemon-reload
 sudo systemctl enable --now vapord
 ```
@@ -101,9 +102,40 @@ sudo systemctl enable --now vapord
 The example unit binds vapord to localhost. Do not expose port 8777 on
 the public interface; put TLS in front of it.
 
-`vapor-admin` must run as a user that can write the content root and the
-database. Either `sudo -u vapor` or add your account to the `vapor` group
-with write access on those two paths.
+## Auto-discovery
+
+Point `library_root` at a directory of games (config `library_root`, or
+`vapord -L PATH`). Each immediate subdirectory is one title:
+
+```
+/srv/vapor/library/
+  Hollow Knight/
+    HollowKnight.zip      # preferred: served in place
+    cover.png             # optional
+  Some RPG/
+    disc.iso              # wrapped into content_root as package.zip;
+                          # original left in place
+  Portable Game/
+    Game.exe              # unpacked tree; zipped into content_root
+    data/
+  Override Me/
+    vapor.json            # optional id/name/version/exec/cover
+    setup.zip
+```
+
+The folder name becomes the catalog title; a slug of that name is the
+id (`Hollow Knight` → `hollow-knight`). Discovery prefers a zip, then
+an unpacked executable tree, then an ISO. An ISO is stored into a zip
+without compression (disc images do not deflate) and the manifest
+points at that zip. Executables named `setup.exe`
+and similar are ignored when a real game binary is present.
+
+Drop a new folder in and wait up to `discover_interval` seconds (or run
+`vapor-admin -L PATH discover`). Removing a folder drops that game from
+the catalog; bytes on disk in `content_root` are left alone.
+
+`vapor-admin add` still works for a fully specified ingest. An
+admin-published id is not overwritten by discovery.
 
 ## TLS: Caddy (recommended)
 

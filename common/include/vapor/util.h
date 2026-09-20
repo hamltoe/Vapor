@@ -10,6 +10,11 @@
 #define VAPOR_ID_MAX 64
 int vapor_id_is_valid(const char *id);
 
+/* Lowercase `name`, map runs of anything that is not [a-z0-9] to '-', trim
+ * dashes, and truncate to VAPOR_ID_MAX. Used to turn a folder title into a
+ * catalog id. Returns 0 and a valid id, or -1 if nothing usable remains. */
+int vapor_id_slug(const char *name, char *out, size_t outsz);
+
 /* Account names are not path segments, but they are unique keys. 3-32 chars of
  * letters, digits, dot, dash or underscore. Shared by vapord and libvapor so
  * the client rejects locally what the server would reject. */

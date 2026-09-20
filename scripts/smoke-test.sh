@@ -63,10 +63,13 @@ export HOME="${work}/home"
 mkdir -p "${XDG_DATA_HOME}" "${HOME}"
 
 vapor() { "${bin}/vapor" "$@"; }
-admin() { "${bin}/vapor-admin" -r "${work}/content" -d "${work}/vapor.db" "$@"; }
+admin() { "${bin}/vapor-admin" -r "${work}/content" -L "${work}/library" \
+    -d "${work}/vapor.db" "$@"; }
 
 step "starting vapord on port ${port}"
-"${bin}/vapord" -p "${port}" -r "${work}/content" -d "${work}/vapor.db" \
+mkdir -p "${work}/library"
+"${bin}/vapord" -p "${port}" -r "${work}/content" -L "${work}/library" \
+    -d "${work}/vapor.db" \
     > "${work}/vapord.log" 2>&1 &
 server_pid=$!
 
@@ -130,6 +133,49 @@ check "admin add newer version" "registered" -- admin add "${gamesrc}" \
     --env "HOLLOW_DATA=\$INSTALL_DIR/assets.dat"
 
 check "admin list" "hollow-vale" -- admin list
+
+step "auto-discovery from library_root"
+portablesrc="${work}/library/Smoke Portable"
+mkdir -p "${portablesrc}/bin"
+cat > "${portablesrc}/bin/smokeport" <<'LAUNCHER'
+#!/usr/bin/env bash
+echo "portable-ok"
+exit 0
+LAUNCHER
+chmod +x "${portablesrc}/bin/smokeport"
+
+check "admin discover" "smoke-portable" -- admin discover
+check "list shows discovered game" "Smoke Portable" -- vapor list
+
+check "install discovered game" "installed" -- vapor install smoke-portable
+check "launch discovered game"  "portable-ok" -- vapor launch smoke-portable
+check "uninstall discovered game" "removed" -- vapor uninstall smoke-portable
+
+step "auto-discovery of a disc image"
+discsrc="${work}/library/Smoke Disc"
+mkdir -p "${discsrc}"
+printf 'fake-iso-bytes' > "${discsrc}/game.iso"
+
+check "admin discover iso" "smoke-disc" -- admin discover
+check "list shows disc game" "Smoke Disc" -- vapor list
+check "install disc game" "installed" -- vapor install smoke-disc
+if [ -f "${work}/games/smoke-disc/game.iso" ]; then
+    ok "iso extracted from wrapped zip"
+else
+    bad "iso extracted from wrapped zip"
+fi
+if [ -f "${discsrc}/game.iso" ]; then
+    ok "original iso left in library"
+else
+    bad "original iso left in library"
+fi
+if ls "${work}/content/smoke-disc/"*/package.zip >/dev/null 2>&1; then
+    ok "iso wrapped into content zip"
+else
+    bad "iso wrapped into content zip"
+fi
+check_fails "disc image cannot launch" vapor launch smoke-disc
+check "uninstall disc game" "removed" -- vapor uninstall smoke-disc
 
 step "catalog"
 check "list shows the game"     "Hollow Vale"   -- vapor list

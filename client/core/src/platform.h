@@ -31,6 +31,12 @@ int vapor_plat_dir_size(const char *path, uint64_t *out);
 int vapor_plat_chmod_matching(const char *root, const char *pattern,
                               size_t *count);
 
+/* Walks `root` and calls `fn` for every regular file. `rel` uses '/' even on
+ * Windows. Directories named `.vapor` and names starting with '.' are skipped.
+ * `fn` returns 0 to continue, or non-zero to stop (that value is returned). */
+typedef int (*vapor_plat_walk_fn)(const char *rel, const char *abs, void *ud);
+int vapor_plat_walk_files(const char *root, vapor_plat_walk_fn fn, void *ud);
+
 /* Spawns and waits. `argv` is NULL-terminated with argv[0] set to `exec`.
  * `env` entries are added to the inherited environment. */
 int vapor_plat_run(const char *exec, char *const argv[], const char *cwd,

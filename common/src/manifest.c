@@ -302,8 +302,10 @@ vapor_manifest_parse(const char *json, size_t len, vapor_manifest *out,
             FAIL("out of memory");
         }
     }
-    if (strcmp(out->package.format, "zip") != 0) {
-        FAIL("unsupported package format \"%s\" (only \"zip\" for now)",
+    if (strcmp(out->package.format, "zip") != 0
+        && strcmp(out->package.format, "iso") != 0
+        && strcmp(out->package.format, "file") != 0) {
+        FAIL("unsupported package format \"%s\" (zip, iso, or file)",
              out->package.format);
     }
     {
@@ -329,7 +331,11 @@ vapor_manifest_parse(const char *json, size_t len, vapor_manifest *out,
         }
     }
     if (ntargets == 0) {
-        FAIL("\"targets\" must contain at least one entry");
+        /* Disc images and zips whose launch files are found after extract. */
+        out->targets = NULL;
+        out->ntargets = 0;
+        cJSON_Delete(root);
+        return 0;
     }
     out->targets = (vapor_target *)calloc(ntargets, sizeof(*out->targets));
     if (!out->targets) {

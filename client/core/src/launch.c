@@ -109,8 +109,10 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
 
     t = vapor_manifest_pick_target(&m, vapor_host_platform(), vapor_host_arch());
     if (!t) {
-        vapor_client_set_error(vc, "%s has no %s/%s build", game_id,
-                               vapor_host_platform(), vapor_host_arch());
+        vapor_client_set_error(vc,
+                               "%s has no launchable executable for %s/%s "
+                               "(disc images cannot be launched yet)",
+                               game_id, vapor_host_platform(), vapor_host_arch());
         vapor_manifest_free(&m);
         return -1;
     }

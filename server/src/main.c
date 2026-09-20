@@ -84,12 +84,13 @@ usage(const char *argv0)
 {
     printf("vapord %s - Vapor game content server\n\n", VAPOR_VERSION_STRING);
     printf("usage: %s [-c CONFIG] [-H ADDR] [-p PORT] [-r CONTENT_ROOT] "
-           "[-d DB_PATH]\n\n",
+           "[-L LIBRARY_ROOT] [-d DB_PATH]\n\n",
            argv0);
     printf("  -c CONFIG        read settings from CONFIG (key = value)\n");
     printf("  -H ADDR          bind address (default 0.0.0.0)\n");
     printf("  -p PORT          listen port (default %d)\n", VAPOR_DEFAULT_PORT);
-    printf("  -r CONTENT_ROOT  directory holding <game>/<version>/package.zip\n");
+    printf("  -r CONTENT_ROOT  packaged <game>/<version>/ files\n");
+    printf("  -L LIBRARY_ROOT  drop folder of game directories to auto-discover\n");
     printf("  -d DB_PATH       SQLite database path\n");
     printf("  --closed         reject new registrations\n");
     printf("  -h, --help       this message\n");
@@ -133,6 +134,9 @@ main(int argc, char **argv)
         } else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
             snprintf(app.cfg.content_root, sizeof(app.cfg.content_root), "%s",
                      argv[++i]);
+        } else if (strcmp(argv[i], "-L") == 0 && i + 1 < argc) {
+            snprintf(app.cfg.library_root, sizeof(app.cfg.library_root), "%s",
+                     argv[++i]);
         } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
             snprintf(app.cfg.db_path, sizeof(app.cfg.db_path), "%s", argv[++i]);
         } else if (strcmp(argv[i], "-H") == 0 && i + 1 < argc) {
@@ -161,6 +165,12 @@ main(int argc, char **argv)
     if (vapord_content_mkdirs(app.cfg.content_root) != 0) {
         fprintf(stderr, "vapord: cannot create content_root \"%s\"\n",
                 app.cfg.content_root);
+        return 1;
+    }
+    if (app.cfg.library_root[0]
+        && vapord_content_mkdirs(app.cfg.library_root) != 0) {
+        fprintf(stderr, "vapord: cannot create library_root \"%s\"\n",
+                app.cfg.library_root);
         return 1;
     }
     {
@@ -229,14 +239,34 @@ main(int argc, char **argv)
     fflush(stdout);
 
     vapord_token_prune(app.db, vapor_now_unix());
+    if (app.cfg.library_root[0]) {
+        vapord_discover(&app);
+    }
 
-    while (!g_stop) {
+    {
+        int64_t last_discover = vapor_now_unix();
+        int64_t last_prune = last_discover;
+
+        while (!g_stop) {
 #if defined(_WIN32)
-        Sleep(200);
+            Sleep(200);
 #else
-        struct timespec ts = { 0, 200 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
+            struct timespec ts = { 0, 200 * 1000 * 1000 };
+            nanosleep(&ts, NULL);
 #endif
+            {
+                int64_t now = vapor_now_unix();
+                if (app.cfg.library_root[0] && app.cfg.discover_interval > 0
+                    && now - last_discover >= app.cfg.discover_interval) {
+                    vapord_discover(&app);
+                    last_discover = now;
+                }
+                if (now - last_prune >= 3600) {
+                    vapord_token_prune(app.db, now);
+                    last_prune = now;
+                }
+            }
+        }
     }
 
     VLOG_INFO("shutting down");

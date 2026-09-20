@@ -21,7 +21,7 @@ Four programs, one CMake project, C11.
 | `vapor-gui` | Windows or Linux | The same work, in a window |
 
 The client never mounts the server disk. Everything goes over HTTP, so a
-NAS versus a local folder is just a `content_root` path on the server.
+NAS versus a local folder is just a `library_root` path on the server.
 
 Typical household setup: build and run **vapord** on a Linux box (or
 WSL), then build the **client** on each player PC.
@@ -95,9 +95,10 @@ powershell -File scripts/start-wsl-server.ps1
 
 That binds vapord to `0.0.0.0:8777` and keeps the database under
 `~/vapor` on the Linux filesystem (SQLite on `/mnt/c` is unreliable).
-The Windows client then uses `http://127.0.0.1:8777`. Keep the content
-root on a Windows path if you want Explorer to see the archives
-(`/mnt/d/Games/vapor-content`).
+The Windows client then uses `http://127.0.0.1:8777`. Keep the game
+drop folder on a Windows path if you want Explorer to see the archives
+(`/mnt/d/Games`). Packaged copies still land under `~/vapor/content` on
+the Linux filesystem.
 
 ## Run the server
 
@@ -108,9 +109,10 @@ build tree, keep everything under `./run` so nothing lands in
 On Linux:
 
 ```
-mkdir -p run/content
+mkdir -p run/content run/library
 ./build-linux/bin/vapord -H 0.0.0.0 -p 8777 \
     -r "$(pwd)/run/content" \
+    -L "$(pwd)/run/library" \
     -d "$(pwd)/run/vapor.db"
 ```
 
@@ -134,10 +136,25 @@ For a systemd install, TLS with Caddy, and a dedicated `vapor` user, see
 
 ## Publish a game
 
-`vapor-admin` zips a folder, writes a manifest, and registers the row.
-Point it at the **same** content root and database as vapord. The folder
-you pass is the game as it should look after install (binaries, data,
-relative launch path).
+Drop a folder into `library_root`. Each game is one unique directory.
+Inside it, vapord accepts a zip (usual case), an ISO, or an unpacked
+tree with an executable. ISOs are wrapped into a zip for download; the
+original disc image stays in the folder:
+
+```
+run/library/
+  My Game/
+    MyGame.zip          # or Game.iso, or Game.exe plus data/
+    cover.png           # optional
+```
+
+The folder name is the catalog title (`My Game` → id `my-game`). vapord
+scans at startup and every minute. `vapor-admin discover` scans once
+immediately. Optional `vapor.json` in the folder overrides id, version,
+and launch paths; see [Docs/manifest.md](Docs/manifest.md).
+
+`vapor-admin add` still packages a folder by hand when you want full
+control of id, version, and exec paths:
 
 ```
 ./build-linux/bin/vapor-admin \

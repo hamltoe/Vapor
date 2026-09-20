@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -75,4 +76,91 @@ vapord_content_mkdirs(const char *path)
         }
     }
     return 0;
+}
+
+static int
+rel_path_ok(const char *rel)
+{
+    const char *p;
+
+    if (!rel || !*rel) {
+        return 0;
+    }
+    if (rel[0] == '/' || rel[0] == '\\') {
+        return 0;
+    }
+    if (strchr(rel, '\\')) {
+        return 0;
+    }
+    p = rel;
+    while (*p) {
+        const char *seg = p;
+        size_t      n;
+
+        while (*p && *p != '/') {
+            p++;
+        }
+        n = (size_t)(p - seg);
+        if (n == 0 || (n == 1 && seg[0] == '.')
+            || (n == 2 && seg[0] == '.' && seg[1] == '.')) {
+            return 0;
+        }
+        if (*p == '/') {
+            p++;
+        }
+    }
+    return 1;
+}
+
+int
+vapord_library_path(const vapord_config *cfg, const char *rel, char *out,
+                    size_t outsz)
+{
+    int n;
+
+    if (!cfg->library_root[0] || !rel_path_ok(rel)) {
+        return -1;
+    }
+    n = snprintf(out, outsz, "%s/%s", cfg->library_root, rel);
+    if (n < 0 || (size_t)n >= outsz) {
+        return -1;
+    }
+    return 0;
+}
+
+int
+vapord_library_resolve(const vapord_config *cfg, const char *rel, char *out,
+                       size_t outsz)
+{
+    char  joined[VAPORD_PATH_MAX];
+    char *root_real = NULL;
+    char *file_real = NULL;
+    size_t n;
+    int    rc = -1;
+
+    if (vapord_library_path(cfg, rel, joined, sizeof(joined)) != 0) {
+        return -1;
+    }
+    root_real = realpath(cfg->library_root, NULL);
+    file_real = realpath(joined, NULL);
+    if (!root_real || !file_real) {
+        goto done;
+    }
+    n = strlen(root_real);
+    if (n == 0 || strncmp(file_real, root_real, n) != 0) {
+        goto done;
+    }
+    if (file_real[n] != '\0' && file_real[n] != '/') {
+        goto done;
+    }
+    if (strlen(file_real) >= outsz) {
+        goto done;
+    }
+    memcpy(out, file_real, strlen(file_real) + 1);
+    rc = 0;
+
+done:
+    free(root_real);
+    free(file_real);
+    return rc;
 }

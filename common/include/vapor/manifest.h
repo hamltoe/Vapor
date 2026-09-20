@@ -32,7 +32,7 @@ typedef struct {
 
 typedef struct {
     char    *file;         /* name within the version directory */
-    char    *format;       /* "zip" */
+    char    *format;       /* "zip", "iso", or "file" */
     uint64_t size;
     char     sha256[VAPOR_SHA256_HEX_LEN + 1];
     char    *strip_prefix; /* leading path component to drop, or NULL */

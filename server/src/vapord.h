@@ -10,6 +10,7 @@
 #include "vapor/manifest.h"
 #include "vapor/protocol.h"
 #include "vapor/sha256.h"
+#include "vapor/util.h"
 
 /* Forward-declared rather than including civetweb.h: vapor-admin reuses the
  * config/db/auth code below and has no business linking a web server. */
@@ -21,9 +22,13 @@ typedef struct {
     int  port;
     char bind_addr[64];
     char content_root[VAPORD_PATH_MAX];
+    /* Drop folder of game directories. Empty means auto-discovery is off. */
+    char library_root[VAPORD_PATH_MAX];
     char db_path[VAPORD_PATH_MAX];
     int  enable_registration;
     int  num_threads;
+    /* Seconds between library scans. 0 = only once at startup / on demand. */
+    int  discover_interval;
 } vapord_config;
 
 typedef struct {
@@ -60,6 +65,30 @@ int vapord_game_upsert(sqlite3 *db, const vapor_manifest *m);
 int vapord_version_upsert(sqlite3 *db, const vapor_manifest *m,
                           const char *manifest_json);
 int vapord_game_delete(sqlite3 *db, const char *game_id);
+int vapord_game_mark_discovered(sqlite3 *db, const char *game_id, int discovered);
+/* 0 if the game exists (*discovered is 0/1), 1 if it does not. */
+int vapord_game_lookup(sqlite3 *db, const char *game_id, int *discovered);
+int vapord_version_set_source(sqlite3 *db, const char *game_id,
+                              const char *version, const char *source_rel);
+/* 0 if this version is served from library_root; 1 if it lives in content_root. */
+int vapord_version_source(sqlite3 *db, const char *game_id, const char *version,
+                          char *out, size_t outsz);
+
+typedef struct {
+    char folder[256];
+    char game_id[VAPOR_ID_MAX + 1];
+    char fingerprint[VAPOR_SHA256_HEX_LEN + 1];
+    char version[VAPOR_VERSION_MAX + 1];
+} vapord_discovered_row;
+
+int vapord_discovered_get(sqlite3 *db, const char *folder,
+                          vapord_discovered_row *out);
+int vapord_discovered_put(sqlite3 *db, const vapord_discovered_row *row);
+int vapord_discovered_delete(sqlite3 *db, const char *folder);
+/* Caller frees *out. */
+int vapord_discovered_list(sqlite3 *db, vapord_discovered_row **out, size_t *count);
+int vapord_discovered_by_id(sqlite3 *db, const char *game_id, char *folder,
+                            size_t foldersz);
 
 /* Newest version of `game_id` by natural version order. 0 on success,
  * 1 if the game exists with no versions, -1 if it does not exist. */
@@ -122,6 +151,22 @@ int vapord_content_path(const vapord_config *cfg, const char *game_id,
                         const char *version, const char *file,
                         char *out, size_t outsz);
 int vapord_content_mkdirs(const char *path);
+
+/* Join library_root + a relative path (may contain subdirectories). Rejects
+ * absolute paths, backslashes, and ".." so a stored source_path cannot walk
+ * out of the drop folder. */
+int vapord_library_path(const vapord_config *cfg, const char *rel,
+                        char *out, size_t outsz);
+/* realpath(library_root/rel) and confirm it still sits under library_root. */
+int vapord_library_resolve(const vapord_config *cfg, const char *rel,
+                           char *out, size_t outsz);
+
+/* Scan library_root, register new or changed game folders, drop vanished ones.
+ * Safe to call repeatedly; unchanged folders are skipped after a cheap
+ * fingerprint compare so multi-gigabyte archives are not re-hashed.
+ * Zip files in the drop folder are served in place. ISO files are wrapped
+ * into a zip under content_root; the original disc image is left alone. */
+int vapord_discover(vapord *app);
 
 /* --------------------------------------------------------------------- log */
 void vapord_log(const char *level, const char *fmt, ...);

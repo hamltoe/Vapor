@@ -591,7 +591,8 @@ cmd_add(vapord *app, int argc, char **argv)
     fclose(f);
 
     if (vapord_game_upsert(app->db, &m) != 0
-        || vapord_version_upsert(app->db, &m, manifest_json) != 0) {
+        || vapord_version_upsert(app->db, &m, manifest_json) != 0
+        || vapord_game_mark_discovered(app->db, id, 0) != 0) {
         fprintf(stderr, "vapor-admin: cannot register %s in the catalog\n", id);
         goto done;
     }
@@ -700,8 +701,10 @@ usage(void)
 {
     printf("vapor-admin %s - manage the Vapor content root and catalog\n\n",
            VAPOR_VERSION_STRING);
-    printf("usage: vapor-admin [-c CONFIG] [-r CONTENT_ROOT] [-d DB] COMMAND\n\n");
+    printf("usage: vapor-admin [-c CONFIG] [-r CONTENT_ROOT] [-L LIBRARY_ROOT] "
+           "[-d DB] COMMAND\n\n");
     printf("  add DIR [options]   package and register a game (see add --help)\n");
+    printf("  discover            scan library_root and register game folders\n");
     printf("  list                show the catalog\n");
     printf("  remove ID           unregister a game\n");
     printf("  users               count registered accounts\n\n");
@@ -735,6 +738,9 @@ main(int argc, char **argv)
         if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
             snprintf(app.cfg.content_root, sizeof(app.cfg.content_root), "%s",
                      argv[++i]);
+        } else if (strcmp(argv[i], "-L") == 0 && i + 1 < argc) {
+            snprintf(app.cfg.library_root, sizeof(app.cfg.library_root), "%s",
+                     argv[++i]);
         } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
             snprintf(app.cfg.db_path, sizeof(app.cfg.db_path), "%s", argv[++i]);
         } else {
@@ -759,6 +765,15 @@ main(int argc, char **argv)
 
     if (strcmp(argv[argi], "add") == 0) {
         rc = cmd_add(&app, argc - argi - 1, argv + argi + 1);
+    } else if (strcmp(argv[argi], "discover") == 0) {
+        if (!app.cfg.library_root[0]) {
+            fprintf(stderr, "vapor-admin: set library_root in the config or pass -L\n");
+            rc = 1;
+        } else if (vapord_discover(&app) != 0) {
+            rc = 1;
+        } else {
+            rc = cmd_list(&app);
+        }
     } else if (strcmp(argv[argi], "list") == 0) {
         rc = cmd_list(&app);
     } else if (strcmp(argv[argi], "remove") == 0) {
