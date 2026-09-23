@@ -38,12 +38,41 @@ entry_from_json(vapor_client *vc, const cJSON *g, vapor_catalog_entry *e)
         e->installed = 1;
         snprintf(e->installed_version, sizeof(e->installed_version), "%s",
                  rec.version);
+        e->setup_pending = rec.setup_pending;
         e->play_seconds = rec.play_seconds;
         /* Natural-order compare, so 1.9 -> 1.10 counts as an update. */
         e->update_available = (e->latest_version[0]
                                && vapor_version_cmp(e->latest_version,
                                                     rec.version)
                                       > 0);
+        if (!e->setup_pending) {
+            vapor_manifest m;
+
+            if (vapor_read_local_manifest(vc, e->id, &m) == 0) {
+                const vapor_target *t = vapor_manifest_pick_target(
+                    &m, vapor_host_platform(), vapor_host_arch());
+                const char         *rel = (t && t->exec) ? t->exec : "";
+                const char         *base = strrchr(rel, '/');
+
+                base = base ? base + 1 : rel;
+                if (vapor_str_has_prefix(rel, "Setup/")
+                    || vapor_str_has_prefix(rel, "setup/")
+                    || vapor_str_has_prefix(rel, "DirectX/")
+                    || vapor_str_has_prefix(rel, "directx/")
+                    || vapor_str_eq_ci(base, "setup.exe")
+                    || vapor_str_eq_ci(base, "launch.exe")
+                    || vapor_str_eq_ci(base, "autorun.exe")
+                    || vapor_str_eq_ci(base, "install.exe")
+                    || vapor_str_has_prefix(base, "setup_")
+                    || vapor_str_has_prefix(base, "instmsi")) {
+                    rec.setup_pending = 1;
+                    if (vapor_db_record_install(vc, &rec) == 0) {
+                        e->setup_pending = 1;
+                    }
+                }
+                vapor_manifest_free(&m);
+            }
+        }
     }
 }
 

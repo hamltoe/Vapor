@@ -194,3 +194,42 @@ vapor_http_download(vapor_client *vc, const char *path, const char *dest_path,
     vapor_net_res_free(&res);
     return 0;
 }
+
+int
+vapor_http_fetch_url(vapor_client *vc, const char *url, const char *dest_path,
+                     vapor_progress_fn cb, void *ud)
+{
+    vapor_net_req req;
+    vapor_net_res res;
+
+    if (!url || !*url || !dest_path || !*dest_path) {
+        vapor_client_set_error(vc, "download URL is missing");
+        return -1;
+    }
+
+    memset(&req, 0, sizeof(req));
+    req.method = "GET";
+    req.url = url;
+    req.dest_path = dest_path;
+    req.progress = cb;
+    req.progress_ud = ud;
+
+    memset(&res, 0, sizeof(res));
+    if (vapor_net_perform(&req, &res) != 0) {
+        if (res.aborted) {
+            vapor_client_set_error(vc, "download cancelled");
+        } else {
+            vapor_client_set_error(vc, "%s",
+                                   res.err[0] ? res.err : "download failed");
+        }
+        vapor_net_res_free(&res);
+        return -1;
+    }
+    if (res.status != 200 && res.status != 206) {
+        vapor_client_set_error(vc, "download failed (HTTP %ld)", res.status);
+        vapor_net_res_free(&res);
+        return -1;
+    }
+    vapor_net_res_free(&res);
+    return 0;
+}

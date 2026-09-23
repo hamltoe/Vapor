@@ -9,6 +9,7 @@ set(VAPOR_CORE_SOURCES
     src/json.c
     src/net.c
     src/install.c
+    src/installer.c
     src/launch.c
 )
 

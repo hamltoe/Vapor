@@ -2,13 +2,15 @@
 <#
     Start, stop, or inspect vapord inside the Ubuntu WSL distro.
 
-    Usage: powershell -File scripts/start-wsl-server.ps1 [start|stop|restart|status]
+    Usage: powershell -File scripts/start-wsl-server.ps1 [start|stop|restart|status|shortcut]
 
     Game drop folder (library_root) defaults to G:\Vapor\Library. Override with
     -Library or $env:VAPOR_LIBRARY_DIR (Windows or /mnt/... path).
+
+    shortcut drops a Desktop (and Start Menu) shortcut that double-clicks start.
 #>
 param(
-    [ValidateSet('start', 'stop', 'restart', 'status')]
+    [ValidateSet('start', 'stop', 'restart', 'status', 'shortcut')]
     [string]$Command = 'start',
     [string]$Distro = 'Ubuntu-24.04',
     [string]$Library = 'G:\Vapor\Library'
@@ -16,6 +18,32 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+
+if ($Command -eq 'shortcut') {
+    $cmd = Join-Path $PSScriptRoot 'start-server.cmd'
+    if (-not (Test-Path $cmd)) {
+        throw "missing $cmd"
+    }
+    $shell = New-Object -ComObject WScript.Shell
+    $places = @(
+        (Join-Path $env:USERPROFILE 'Desktop\Vapor Server.lnk'),
+        (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Vapor Server.lnk')
+    )
+    foreach ($path in $places) {
+        $dir = Split-Path $path
+        if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir | Out-Null
+        }
+        $lnk = $shell.CreateShortcut($path)
+        $lnk.TargetPath = $cmd
+        $lnk.WorkingDirectory = $root
+        $lnk.WindowStyle = 1
+        $lnk.Description = 'Start the Vapor host (vapord in WSL)'
+        $lnk.Save()
+        Write-Host "shortcut: $path"
+    }
+    exit 0
+}
 
 if ($root -notmatch '^[A-Za-z]:\\') {
     throw "unexpected repo path '$root'"

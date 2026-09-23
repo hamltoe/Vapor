@@ -87,18 +87,26 @@ Pass `-NoGui` only if you must build the CLI without SDL2. Re-run
 `vendor-deps.ps1` if the GUI is skipped because `third_party\sdl2` is missing.
 
 A Windows machine can still host the **server** by building it inside
-WSL with the Linux steps above. After Ubuntu is installed:
+WSL with the Linux steps above. After Ubuntu is installed, start vapord
+any of these ways:
 
 ```
 powershell -File scripts/start-wsl-server.ps1
 ```
 
+Double-click `scripts\start-server.cmd`. Stop with `scripts\stop-server.cmd`.
+Once per machine, pin a Desktop / Start Menu shortcut:
+
+```
+powershell -File scripts/start-wsl-server.ps1 shortcut
+```
+
 That binds vapord to `0.0.0.0:8777` and keeps the database under
 `~/vapor` on the Linux filesystem (SQLite on `/mnt/c` is unreliable).
-The Windows client then uses `http://127.0.0.1:8777`. Keep the game
-drop folder on a Windows path if you want Explorer to see the archives
-(`/mnt/d/Games`). Packaged copies still land under `~/vapor/content` on
-the Linux filesystem.
+The host window appears through WSLg. The Windows client then uses
+`http://127.0.0.1:8777`. Keep the game drop folder on a Windows path if
+you want Explorer to see the archives (`/mnt/d/Games`). Packaged copies
+still land under `~/vapor/content` on the Linux filesystem.
 
 ## Run the server
 
@@ -137,10 +145,11 @@ For a systemd install, TLS with Caddy, and a dedicated `vapor` user, see
 ## Publish a game
 
 Drop a folder into `library_root`. Each game is one unique directory.
-Inside it, vapord accepts a zip (usual case), an ISO, or an unpacked
-tree with an executable. ISOs are unpacked and the files are zipped for
-download; a Wise SETUP.EXE on the disc is unpacked too. The original
-disc image stays in the folder:
+Inside it, vapord accepts a zip (usual case), one or more ISOs, or an
+unpacked tree with an executable. Disc images in the same folder are
+merged, unpacked, and zipped for download; a Wise SETUP.EXE on the disc
+is unpacked too. Windows installer kits (`setup.exe`, `.msi`) are run on
+the player PC after download. The original images stay in the folder:
 
 ```
 run/library/
@@ -256,8 +265,16 @@ stays up.
 .\build-windows\bin\vapor-gui.exe
 ```
 
-Sign in, wait for the catalog, then **Install** / **Play**. **Update**
-appears when the server has a newer version than the one on disk.
+Sign in, wait for the catalog, then **Install** / **Play**. Install
+downloads the kit and, on Windows, runs the leftover installer. Inno,
+NSIS, and MSI wrappers install unattended into a tracked folder.
+InstallShield disc kits (Doom 3 and similar) open the Setup wizard
+instead — quiet MSI mode hangs with no window. Play is offered only
+after that destination has a game binary plus data. **Setup** retries
+if the wizard did not finish. Retail SafeDisc executables are not
+launched; Doom 3 uses the dhewm3 source port (downloaded on first Play
+into `%LOCALAPPDATA%\Vapor\runtimes\dhewm3`). **Update** appears when
+the server has a newer version than the one on disk.
 
 ## Everyday commands
 
@@ -265,6 +282,7 @@ appears when the server has a newer version than the one on disk.
 vapor whoami                 # which account is stored
 vapor info my-game           # versions, install path, playtime
 vapor installed              # local library
+vapor setup my-game          # retry a Windows installer that is still pending
 vapor verify my-game         # check an install against its manifest
 vapor uninstall my-game
 vapor logout

@@ -17,14 +17,17 @@ vapor_db_record_install(vapor_client *vc, const vapor_install *rec)
 
     if (sqlite3_prepare_v2(vc->db,
                            "INSERT INTO installs (game_id, version, name,"
-                           "   install_dir, installed_at, size_on_disk)"
-                           " VALUES (?, ?, ?, ?, ?, ?)"
+                           "   install_dir, installed_at, size_on_disk,"
+                           "   setup_pending, payload_dir)"
+                           " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                            " ON CONFLICT(game_id) DO UPDATE SET"
                            "   version = excluded.version,"
                            "   name = excluded.name,"
                            "   install_dir = excluded.install_dir,"
                            "   installed_at = excluded.installed_at,"
-                           "   size_on_disk = excluded.size_on_disk",
+                           "   size_on_disk = excluded.size_on_disk,"
+                           "   setup_pending = excluded.setup_pending,"
+                           "   payload_dir = excluded.payload_dir",
                            -1, &st, NULL)
         != SQLITE_OK) {
         vapor_client_set_error(vc, "%s", sqlite3_errmsg(vc->db));
@@ -36,6 +39,10 @@ vapor_db_record_install(vapor_client *vc, const vapor_install *rec)
     sqlite3_bind_text(st, 4, rec->install_dir, -1, SQLITE_STATIC);
     sqlite3_bind_int64(st, 5, rec->installed_at);
     sqlite3_bind_int64(st, 6, (sqlite3_int64)rec->size_on_disk);
+    sqlite3_bind_int(st, 7, rec->setup_pending ? 1 : 0);
+    sqlite3_bind_text(st, 8,
+                      rec->payload_dir[0] ? rec->payload_dir : rec->install_dir,
+                      -1, SQLITE_STATIC);
 
     rc = sqlite3_step(st);
     sqlite3_finalize(st);
@@ -82,11 +89,18 @@ row_to_install(sqlite3_stmt *st, vapor_install *out)
     out->last_played_at = sqlite3_column_int64(st, 5);
     out->play_seconds = sqlite3_column_int64(st, 6);
     out->size_on_disk = (uint64_t)sqlite3_column_int64(st, 7);
+    out->setup_pending = sqlite3_column_int(st, 8);
+    s = (const char *)sqlite3_column_text(st, 9);
+    snprintf(out->payload_dir, sizeof(out->payload_dir), "%s", s ? s : "");
+    if (!out->payload_dir[0]) {
+        snprintf(out->payload_dir, sizeof(out->payload_dir), "%s",
+                 out->install_dir);
+    }
 }
 
 #define INSTALL_COLUMNS                                                        \
     "game_id, version, name, install_dir, installed_at, last_played_at,"       \
-    " play_seconds, size_on_disk"
+    " play_seconds, size_on_disk, setup_pending, payload_dir"
 
 int
 vapor_db_get_install(vapor_client *vc, const char *game_id, vapor_install *out)

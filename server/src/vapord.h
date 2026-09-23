@@ -198,10 +198,11 @@ int vapord_library_resolve(const vapord_config *cfg, const char *rel,
  * Safe to call repeatedly; unchanged folders are skipped after a cheap
  * fingerprint compare so multi-gigabyte archives are not re-hashed.
  * Zip files in the drop folder are served in place. ISO files are unpacked
- * (and a bundled Wise SETUP.EXE is unpacked too) and the files are zipped
- * under content_root; the original disc image is left alone. CD leftovers
- * (autorun, and a tiny root *.DAT that has a larger namesake below) are
- * stripped so the tree matches a SETUP install. */
+ * (every image in the folder is merged; a bundled Wise SETUP.EXE is unpacked
+ * too) and the files are zipped under content_root; the original disc images
+ * are left alone. CD leftovers (autorun, launch.exe, and a tiny root *.DAT
+ * that has a larger namesake below) are stripped so the tree matches a
+ * SETUP install. */
 int vapord_discover(vapord *app);
 
 /* Host window (SDL + Nuklear). Closing it stops the server. Returns 0 after

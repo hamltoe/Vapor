@@ -37,6 +37,7 @@ usage(void)
     printf("      --force                 reinstall even if up to date\n");
     printf("      --verify-only           download and check, do not extract\n");
     printf("      --keep-download         keep the archive in the cache\n");
+    printf("    setup GAME              run a downloaded Windows installer\n");
     printf("    launch GAME             run an installed game\n");
     printf("    verify GAME             check an install against its manifest\n");
     printf("    uninstall GAME          delete an installed game\n\n");
@@ -320,6 +321,7 @@ cmd_list(vapor_client *vc)
                rows[i].latest_version[0] ? rows[i].latest_version : "-", size,
                rows[i].name,
                rows[i].update_available  ? " [update available]"
+               : rows[i].setup_pending   ? " [needs setup]"
                : rows[i].installed       ? " [installed]"
                                          : "");
     }
@@ -382,7 +384,8 @@ cmd_info(vapor_client *vc, const char *game_id)
     printf("%s\n", d.nversions ? "" : "(none published)");
 
     if (vapor_db_get_install(vc, game_id, &rec) == 0) {
-        printf("  installed ...... %s at %s\n", rec.version, rec.install_dir);
+        printf("  installed ...... %s at %s%s\n", rec.version, rec.install_dir,
+               rec.setup_pending ? " (setup pending)" : "");
         if (rec.play_seconds > 0) {
             char when[64];
             vapor_format_duration(rec.play_seconds, when, sizeof(when));
@@ -419,7 +422,9 @@ cmd_installed(vapor_client *vc)
         vapor_format_duration(rows[i].play_seconds, played, sizeof(played));
         printf("%-22s %-10s %10s  %-28s %s\n", rows[i].game_id, rows[i].version,
                size, rows[i].name,
-               rows[i].play_seconds > 0 ? played : "");
+               rows[i].setup_pending ? "setup pending"
+               : rows[i].play_seconds > 0 ? played
+                                          : "");
     }
     free(rows);
     return 0;
@@ -437,10 +442,11 @@ static int
 on_progress(void *ud, uint64_t done, uint64_t total)
 {
     progress_state *ps = (progress_state *)ud;
-    char            a[32], b[32];
 
     if (total == 0) {
         /* Unknown length: fall back to reporting bytes every megabyte. */
+        char a[32];
+
         if (done - ps->last_done < 1024 * 1024) {
             return 0;
         }
@@ -458,19 +464,16 @@ on_progress(void *ud, uint64_t done, uint64_t total)
         }
         ps->last_percent = pct;
 
-        vapor_format_bytes(done, a, sizeof(a));
-        vapor_format_bytes(total, b, sizeof(b));
-
         if (ps->is_tty) {
-            /* A 30-cell bar, redrawn in place. */
+            /* A 30-cell bar, redrawn in place. Overall install, not download. */
             int filled = pct * 30 / 100, i;
             printf("\r  [");
             for (i = 0; i < 30; i++) {
                 putchar(i < filled ? '#' : ' ');
             }
-            printf("] %3d%%  %s / %s", pct, a, b);
+            printf("] %3d%%", pct);
         } else if (pct % 10 == 0) {
-            printf("  %3d%%  %s / %s\n", pct, a, b);
+            printf("  %3d%%\n", pct);
         }
         fflush(stdout);
     }
@@ -543,6 +546,27 @@ cmd_install(vapor_client *vc, int argc, char **argv)
     }
     if (rc != 0) {
         fprintf(stderr, "vapor: %s\n", vc->err);
+        return 1;
+    }
+    return 0;
+}
+
+static int
+cmd_setup(vapor_client *vc, const char *game_id)
+{
+    int rc = vapor_setup_game(vc, game_id);
+
+    if (rc < 0) {
+        fprintf(stderr, "vapor: %s\n", vc->err);
+        return 1;
+    }
+    if (rc > 0) {
+        if (vc->err[0]) {
+            fprintf(stderr, "vapor: %s\n", vc->err);
+        } else {
+            fprintf(stderr,
+                    "vapor: installer finished, but the game was not found\n");
+        }
         return 1;
     }
     return 0;
@@ -705,6 +729,13 @@ main(int argc, char **argv)
         rc = cmd_installed(&vc);
     } else if (strcmp(cmd, "install") == 0) {
         rc = cmd_install(&vc, argc - 2, argv + 2);
+    } else if (strcmp(cmd, "setup") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "vapor: setup needs a game id\n");
+            rc = 1;
+        } else {
+            rc = cmd_setup(&vc, argv[2]);
+        }
     } else if (strcmp(cmd, "uninstall") == 0) {
         if (argc < 3) {
             fprintf(stderr, "vapor: uninstall needs a game id\n");

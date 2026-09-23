@@ -18,10 +18,19 @@
 #include <direct.h>
 #define MKDIR(p) _mkdir(p)
 #define FSEEK64(f, o, w) _fseeki64((f), (o), (w))
+#define FTELL64(f) _ftelli64(f)
 #else
 #define MKDIR(p) mkdir((p), 0755)
 #define FSEEK64(f, o, w) fseeko((f), (o), (w))
+#define FTELL64(f) ftello(f)
 #endif
+
+typedef struct {
+    vapor_iso_progress_fn cb;
+    void                 *ud;
+    uint64_t              done;
+    uint64_t              total;
+} iso_progress;
 
 static void
 set_err(char *err, size_t errsz, const char *msg)
@@ -205,7 +214,7 @@ mkdirs_parent(const char *path)
 
 static int
 copy_extent(FILE *in, uint32_t lba, uint32_t size, const char *dest,
-            char *err, size_t errsz)
+            char *err, size_t errsz, iso_progress *prog)
 {
     FILE          *out;
     unsigned char  buf[64 * 1024];
@@ -233,6 +242,20 @@ copy_extent(FILE *in, uint32_t lba, uint32_t size, const char *dest,
             return -1;
         }
         left -= (uint32_t)n;
+        if (prog && prog->cb) {
+            uint64_t shown;
+
+            prog->done += (uint64_t)n;
+            shown = prog->done;
+            if (prog->total > 0 && shown > prog->total) {
+                shown = prog->total;
+            }
+            if (prog->cb(prog->ud, shown, prog->total) != 0) {
+                fclose(out);
+                set_err(err, errsz, "ISO extract cancelled");
+                return -1;
+            }
+        }
     }
     if (fclose(out) != 0) {
         set_err(err, errsz, "failed to close extracted ISO file");
@@ -243,7 +266,8 @@ copy_extent(FILE *in, uint32_t lba, uint32_t size, const char *dest,
 
 static int
 walk_dir(FILE *in, uint32_t lba, uint32_t size, const char *dest_root,
-         const char *rel, int joliet, int depth, char *err, size_t errsz)
+         const char *rel, int joliet, int depth, char *err, size_t errsz,
+         iso_progress *prog)
 {
     unsigned char *dir;
     uint32_t       off = 0;
@@ -325,12 +349,12 @@ walk_dir(FILE *in, uint32_t lba, uint32_t size, const char *dest_root,
                 goto done;
             }
             if (walk_dir(in, flba, flen, dest_root, child_rel, joliet, depth + 1,
-                         err, errsz)
+                         err, errsz, prog)
                 != 0) {
                 goto done;
             }
         } else if (flen > 0) {
-            if (copy_extent(in, flba, flen, child_abs, err, errsz) != 0) {
+            if (copy_extent(in, flba, flen, child_abs, err, errsz, prog) != 0) {
                 goto done;
             }
         }
@@ -344,8 +368,9 @@ done:
 }
 
 int
-vapor_iso_extract(const char *iso_path, const char *dest_dir, char *err,
-                  size_t errsz)
+vapor_iso_extract_progress(const char *iso_path, const char *dest_dir,
+                           char *err, size_t errsz, vapor_iso_progress_fn cb,
+                           void *ud)
 {
     FILE          *f;
     unsigned char  sec[ISO_SECTOR];
@@ -355,6 +380,8 @@ vapor_iso_extract(const char *iso_path, const char *dest_dir, char *err,
     uint32_t       i, root_lba, root_len;
     unsigned char *root;
     uint16_t       block;
+    iso_progress   prog;
+    long long      nbytes;
 
     if (!iso_path || !dest_dir) {
         set_err(err, errsz, "ISO extract arguments are missing");
@@ -365,6 +392,20 @@ vapor_iso_extract(const char *iso_path, const char *dest_dir, char *err,
         set_err(err, errsz, "cannot open ISO image");
         return -1;
     }
+
+    memset(&prog, 0, sizeof(prog));
+    prog.cb = cb;
+    prog.ud = ud;
+    if (FSEEK64(f, 0, SEEK_END) == 0) {
+        nbytes = FTELL64(f);
+        if (nbytes > 0) {
+            prog.total = (uint64_t)nbytes;
+        }
+    }
+    if (prog.total == 0) {
+        prog.total = 1;
+    }
+    rewind(f);
 
     memset(pvd, 0, sizeof(pvd));
     memset(svd, 0, sizeof(svd));
@@ -410,11 +451,23 @@ vapor_iso_extract(const char *iso_path, const char *dest_dir, char *err,
         set_err(err, errsz, "cannot create ISO extract directory");
         return -1;
     }
-    if (walk_dir(f, root_lba, root_len, dest_dir, "", have_joliet, 0, err, errsz)
+    if (walk_dir(f, root_lba, root_len, dest_dir, "", have_joliet, 0, err, errsz,
+                 cb ? &prog : NULL)
         != 0) {
         fclose(f);
         return -1;
     }
+    if (cb) {
+        (void)cb(ud, prog.total, prog.total);
+    }
     fclose(f);
     return 0;
+}
+
+int
+vapor_iso_extract(const char *iso_path, const char *dest_dir, char *err,
+                  size_t errsz)
+{
+    return vapor_iso_extract_progress(iso_path, dest_dir, err, errsz, NULL,
+                                      NULL);
 }

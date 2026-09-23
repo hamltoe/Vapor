@@ -8,15 +8,16 @@
  *       cover.png            (optional)
  *       vapor.json           (optional overrides)
  *     Disc Game/
- *       Game.iso            (left in place; wrapped into content_root)
+ *       Disc 1.iso          (all images unpacked into one tree, then zipped;
+ *       Disc 2.iso           originals left in the drop folder)
  *     Portable Game/
  *       Game.exe
  *       data/
  *
- * Zip files already sitting in library_root are served in place. An ISO is
- * unpacked (ISO 9660 / Joliet); a Wise SETUP.EXE on the disc is unpacked
- * too, and the files are zipped into
- * <content_root>/<id>/<version>/package.zip; the original disc image is left
+ * Zip files already sitting in library_root are served in place. ISO files
+ * are unpacked (ISO 9660 / Joliet); every image in the folder is merged.
+ * A Wise SETUP.EXE on the disc is unpacked too, and the files are zipped into
+ * <content_root>/<id>/<version>/package.zip; the original disc images are left
  * in the drop folder. A folder of loose files is zipped the same way.
  * Unchanged folders are fingerprint-skipped so large archives are not
  * re-hashed.
@@ -88,6 +89,23 @@ strlist_free(strlist *l)
     }
     free(l->items);
     memset(l, 0, sizeof(*l));
+}
+
+static int
+cmp_strptr(const void *a, const void *b)
+{
+    const char *const *sa = a;
+    const char *const *sb = b;
+
+    return strcmp(*sa, *sb);
+}
+
+static void
+strlist_sort(strlist *l)
+{
+    if (l && l->count > 1) {
+        qsort(l->items, l->count, sizeof(*l->items), cmp_strptr);
+    }
 }
 
 static const char *
@@ -419,7 +437,8 @@ is_junk_exec(const char *base)
 {
     static const char *const junk[] = {
         "setup.exe", "install.exe", "installer.exe", "unins000.exe",
-        "uninstall.exe", "dxsetup.exe", "autorun.exe", "vcredist", "vc_redist",
+        "uninstall.exe", "dxsetup.exe", "autorun.exe", "launch.exe",
+        "setup_", "instmsi", "vcredist", "vc_redist",
         "unitycrashhandler", "crashreporter", "easyanticheat",
         "dotnetfx", NULL
     };
@@ -465,8 +484,9 @@ score_exec(const char *rel, const char *want_slug, int junk_ok)
         return -1;
     }
     score = 200 - path_depth(rel) * 15;
-    if (want_slug && *want_slug && vapor_id_slug(base, slug, sizeof(slug)) == 0) {
-        if (strcmp(slug, want_slug) == 0) {
+    if (want_slug && *want_slug
+        && vapor_id_slug_stem(base, slug, sizeof(slug)) == 0) {
+        if (vapor_slug_match(slug, want_slug)) {
             score += 80;
         } else {
             char init[16];
@@ -650,6 +670,37 @@ fingerprint_stat(const char *tag, const char *name, uint64_t size, int64_t mtime
     vapor_sha256_hex_buf(line, strlen(line), out);
 }
 
+static int
+fingerprint_iso_list(const char *root, const strlist *isos,
+                     char out[VAPOR_SHA256_HEX_LEN + 1])
+{
+    vapor_sha256 ctx;
+    uint8_t      digest[VAPOR_SHA256_DIGEST_LEN];
+    size_t       i;
+
+    vapor_sha256_init(&ctx);
+    vapor_sha256_update(&ctx, "iso-setup1", 10);
+    for (i = 0; i < isos->count; i++) {
+        char        abs[VAPORD_PATH_MAX];
+        char        line[VAPORD_PATH_MAX + 80];
+        struct stat st;
+        int         n;
+
+        if (join2(abs, sizeof(abs), root, isos->items[i]) != 0
+            || stat(abs, &st) != 0) {
+            continue;
+        }
+        n = snprintf(line, sizeof(line), "\n%s|%llu|%lld", isos->items[i],
+                     (unsigned long long)st.st_size, (long long)st.st_mtime);
+        if (n > 0) {
+            vapor_sha256_update(&ctx, line, (size_t)n);
+        }
+    }
+    vapor_sha256_final(&ctx, digest);
+    vapor_sha256_hex(digest, out);
+    return 0;
+}
+
 /* ---------------------------------------------------------------- zip packaging */
 
 typedef struct {
@@ -774,7 +825,52 @@ zip_file_store(const char *src_file, const char *arcname, const char *out_zip)
     return 0;
 }
 
+static int
+zip_files_store(const char *root, const strlist *rels, const char *out_zip)
+{
+    mz_zip_archive zip;
+    size_t         i;
+
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_writer_init_file_v2(&zip, out_zip, 0, MZ_ZIP_FLAG_WRITE_ZIP64)) {
+        return -1;
+    }
+    for (i = 0; i < rels->count; i++) {
+        char abs[VAPORD_PATH_MAX];
+
+        if (join2(abs, sizeof(abs), root, rels->items[i]) != 0) {
+            mz_zip_writer_end(&zip);
+            remove(out_zip);
+            return -1;
+        }
+        if (!mz_zip_writer_add_file(&zip, rels->items[i], abs, NULL, 0,
+                                    MZ_NO_COMPRESSION)) {
+            mz_zip_writer_end(&zip);
+            remove(out_zip);
+            return -1;
+        }
+    }
+    if (!mz_zip_writer_finalize_archive(&zip)) {
+        mz_zip_writer_end(&zip);
+        remove(out_zip);
+        return -1;
+    }
+    mz_zip_writer_end(&zip);
+    return 0;
+}
+
 /* ---------------------------------------------------------------- inspect */
+
+static int
+is_installer_kit_rel(const char *rel)
+{
+    /* Disc/MSI kits stage the game under Setup/Data; that is not a finished
+     * install. DirectX redistributables are the same kind of leftover. */
+    return vapor_str_has_prefix(rel, "Setup/")
+        || vapor_str_has_prefix(rel, "setup/")
+        || vapor_str_has_prefix(rel, "DirectX/")
+        || vapor_str_has_prefix(rel, "directx/");
+}
 
 static void
 consider_exec(const char *rel, const char *slug, int want_win, int want_lin,
@@ -783,6 +879,9 @@ consider_exec(const char *rel, const char *slug, int want_win, int want_lin,
 {
     int s;
 
+    if (is_installer_kit_rel(rel)) {
+        return;
+    }
     if (want_win) {
         s = score_exec(rel, slug, junk_ok);
         if (s > *win_score) {
@@ -1098,6 +1197,76 @@ find_largest(const char *root, const char *rel, int (*match)(const char *),
 }
 
 static int
+collect_matching(const char *root, const char *rel, int (*match)(const char *),
+                 strlist *out)
+{
+    char           abs[VAPORD_PATH_MAX];
+    DIR           *d;
+    struct dirent *ent;
+    int            rc = 0;
+
+    if (rel[0]) {
+        if (join2(abs, sizeof(abs), root, rel) != 0) {
+            return -1;
+        }
+    } else {
+        snprintf(abs, sizeof(abs), "%s", root);
+    }
+    d = opendir(abs);
+    if (!d) {
+        return -1;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        char        child_rel[VAPORD_PATH_MAX];
+        char        child_abs[VAPORD_PATH_MAX];
+        struct stat st;
+
+        if (skip_walk_dir(ent->d_name) && strcmp(ent->d_name, ".") != 0
+            && strcmp(ent->d_name, "..") != 0) {
+            continue;
+        }
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        if (rel[0]) {
+            if (join2(child_rel, sizeof(child_rel), rel, ent->d_name) != 0) {
+                continue;
+            }
+        } else {
+            snprintf(child_rel, sizeof(child_rel), "%s", ent->d_name);
+        }
+        if (join2(child_abs, sizeof(child_abs), root, child_rel) != 0) {
+            continue;
+        }
+        if (lstat(child_abs, &st) != 0) {
+            continue;
+        }
+        if (S_ISLNK(st.st_mode)) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            if (collect_matching(root, child_rel, match, out) != 0) {
+                rc = -1;
+                break;
+            }
+            continue;
+        }
+        if (!S_ISREG(st.st_mode)) {
+            continue;
+        }
+        if (!match(ent->d_name)) {
+            continue;
+        }
+        if (strlist_push(out, child_rel) != 0) {
+            rc = -1;
+            break;
+        }
+    }
+    closedir(d);
+    return rc;
+}
+
+static int
 find_cover(const char *dir, char *out, size_t outsz)
 {
     static const char *const names[] = {
@@ -1340,7 +1509,8 @@ publish_game(vapord *app, const char *folder, const char *abs_dir,
              const char *package_abs, const char *package_file,
              const char *win_exec, const char *lin_exec,
              const char *strip_prefix, const char *cover_src,
-             const char *fingerprint, int allow_no_target)
+             const char *fingerprint, int allow_no_target,
+             const strlist *iso_rels)
 {
     vapor_manifest m;
     char           version_dir[VAPORD_PATH_MAX];
@@ -1388,41 +1558,80 @@ publish_game(vapord *app, const char *folder, const char *abs_dir,
             goto done;
         }
         rm_tree(extract_dir);
-        VLOG_INFO("discover: unpacking disc image \"%s\"",
-                  basename_of(package_abs));
-        if (vapor_iso_extract(package_abs, extract_dir, iso_err, sizeof(iso_err))
-            != 0) {
-            VLOG_WARN("discover: cannot unpack %s (%s); wrapping the image as a file",
-                      basename_of(package_abs), iso_err);
-            if (zip_file_store(package_abs, basename_of(package_abs), pkg_path)
-                != 0) {
-                VLOG_WARN("discover: failed to zip \"%s\"", package_abs);
-                goto done;
-            }
-            allow_no_target = 1;
-        } else {
-            unpack_wise_installers(extract_dir);
-            vapor_disc_finish_install(extract_dir);
-            fold_case_collisions(extract_dir);
-            if (!(win_exec && *win_exec) && !(lin_exec && *lin_exec)) {
-                inspect_dir(extract_dir, id, win_found, sizeof(win_found),
-                            lin_found, sizeof(lin_found));
-                if (win_found[0]) {
-                    win_exec = win_found;
+        if (iso_rels && iso_rels->count > 0) {
+            size_t i;
+            int    unpacked = 0;
+
+            for (i = 0; i < iso_rels->count; i++) {
+                char iso_abs[VAPORD_PATH_MAX];
+
+                if (join2(iso_abs, sizeof(iso_abs), abs_dir, iso_rels->items[i])
+                    != 0) {
+                    continue;
                 }
-                if (lin_found[0]) {
-                    lin_exec = lin_found;
+                VLOG_INFO("discover: unpacking disc image \"%s\" (%zu/%zu)",
+                          basename_of(iso_rels->items[i]), i + 1,
+                          iso_rels->count);
+                if (vapor_iso_extract(iso_abs, extract_dir, iso_err,
+                                      sizeof(iso_err))
+                    != 0) {
+                    VLOG_WARN("discover: cannot unpack %s (%s)",
+                              basename_of(iso_rels->items[i]), iso_err);
+                    continue;
                 }
+                unpacked++;
             }
-            VLOG_INFO("discover: packaging unpacked disc \"%s\"", folder);
-            if (zip_directory(extract_dir, pkg_path) != 0) {
-                rm_tree(extract_dir);
-                VLOG_WARN("discover: failed to zip unpacked ISO for \"%s\"",
+            if (unpacked == 0) {
+                VLOG_WARN("discover: cannot unpack disc images in \"%s\"; "
+                          "wrapping the images as files",
                           folder);
-                goto done;
+                if (zip_files_store(abs_dir, iso_rels, pkg_path) != 0) {
+                    VLOG_WARN("discover: failed to zip disc images for \"%s\"",
+                              folder);
+                    goto done;
+                }
+                allow_no_target = 1;
+                goto iso_packaged;
             }
-            rm_tree(extract_dir);
+        } else {
+            VLOG_INFO("discover: unpacking disc image \"%s\"",
+                      basename_of(package_abs));
+            if (vapor_iso_extract(package_abs, extract_dir, iso_err,
+                                  sizeof(iso_err))
+                != 0) {
+                VLOG_WARN("discover: cannot unpack %s (%s); wrapping the image as a file",
+                          basename_of(package_abs), iso_err);
+                if (zip_file_store(package_abs, basename_of(package_abs), pkg_path)
+                    != 0) {
+                    VLOG_WARN("discover: failed to zip \"%s\"", package_abs);
+                    goto done;
+                }
+                allow_no_target = 1;
+                goto iso_packaged;
+            }
         }
+        unpack_wise_installers(extract_dir);
+        vapor_disc_finish_install(extract_dir);
+        fold_case_collisions(extract_dir);
+        if (!(win_exec && *win_exec) && !(lin_exec && *lin_exec)) {
+            inspect_dir(extract_dir, id, win_found, sizeof(win_found),
+                        lin_found, sizeof(lin_found));
+            if (win_found[0]) {
+                win_exec = win_found;
+            }
+            if (lin_found[0]) {
+                lin_exec = lin_found;
+            }
+        }
+        VLOG_INFO("discover: packaging unpacked disc \"%s\"", folder);
+        if (zip_directory(extract_dir, pkg_path) != 0) {
+            rm_tree(extract_dir);
+            VLOG_WARN("discover: failed to zip unpacked ISO for \"%s\"",
+                      folder);
+            goto done;
+        }
+        rm_tree(extract_dir);
+    iso_packaged:
         package_file = PACKAGED_ZIP;
         format = "zip";
     } else {
@@ -1556,7 +1765,6 @@ process_folder(vapord *app, const char *folder, int *meta_left)
     char            name[256];
     char            version[VAPOR_VERSION_MAX + 1];
     char            zip_rel[VAPORD_PATH_MAX] = "";
-    char            iso_rel[VAPORD_PATH_MAX] = "";
     char            pkg_rel[VAPORD_PATH_MAX] = "";
     char            pkg_abs[VAPORD_PATH_MAX];
     char            pkg_file[256] = "";
@@ -1566,13 +1774,15 @@ process_folder(vapord *app, const char *folder, int *meta_left)
     char            strip[VAPORD_PATH_MAX] = "";
     char            cover_src[VAPORD_PATH_MAX] = "";
     char            fingerprint[VAPOR_SHA256_HEX_LEN + 1];
-    uint64_t        zip_size = 0, iso_size = 0;
+    uint64_t        zip_size = 0;
     struct stat     st;
     vapord_discovered_row prev;
     int             kind_dir = 0;
     int             wrap_iso = 0;
     int             zip_has_iso = 0;
     int             have_exec;
+    int             rc = 0;
+    strlist         isos = { 0 };
 
     if (join2(abs, sizeof(abs), app->cfg.library_root, folder) != 0) {
         return -1;
@@ -1612,6 +1822,10 @@ process_folder(vapord *app, const char *folder, int *meta_left)
             wrap_iso = 1;
             snprintf(format, sizeof(format), "zip");
             snprintf(pkg_file, sizeof(pkg_file), "%s", PACKAGED_ZIP);
+            if (strlist_push(&isos, meta.package) != 0) {
+                rc = 0;
+                goto out;
+            }
         } else {
             snprintf(format, sizeof(format), "zip");
             inspect_zip(pkg_abs, slug, win_exec, sizeof(win_exec), lin_exec,
@@ -1619,7 +1833,11 @@ process_folder(vapord *app, const char *folder, int *meta_left)
         }
     } else {
         find_largest(abs, "", is_zip_name, zip_rel, sizeof(zip_rel), &zip_size);
-        find_largest(abs, "", is_iso_name, iso_rel, sizeof(iso_rel), &iso_size);
+        if (collect_matching(abs, "", is_iso_name, &isos) != 0) {
+            rc = 0;
+            goto out;
+        }
+        strlist_sort(&isos);
         have_exec = (inspect_dir(abs, slug, win_exec, sizeof(win_exec), lin_exec,
                                  sizeof(lin_exec))
                      == 0);
@@ -1629,7 +1847,8 @@ process_folder(vapord *app, const char *folder, int *meta_left)
             snprintf(pkg_file, sizeof(pkg_file), "%s", basename_of(zip_rel));
             snprintf(format, sizeof(format), "zip");
             if (join2(pkg_abs, sizeof(pkg_abs), abs, zip_rel) != 0) {
-                return 0;
+                rc = 0;
+                goto out;
             }
             win_exec[0] = lin_exec[0] = '\0';
             if (inspect_zip(pkg_abs, slug, win_exec, sizeof(win_exec), lin_exec,
@@ -1637,24 +1856,27 @@ process_folder(vapord *app, const char *folder, int *meta_left)
                             &zip_has_iso)
                 < 0) {
                 VLOG_WARN("discover: cannot read zip %s/%s", folder, zip_rel);
-                return 0;
+                rc = 0;
+                goto out;
             }
         } else if (have_exec) {
             kind_dir = 1;
             snprintf(format, sizeof(format), "zip");
             snprintf(pkg_file, sizeof(pkg_file), "%s", PACKAGED_ZIP);
-        } else if (iso_rel[0]) {
+        } else if (isos.count > 0) {
             wrap_iso = 1;
-            snprintf(pkg_rel, sizeof(pkg_rel), "%s", iso_rel);
+            snprintf(pkg_rel, sizeof(pkg_rel), "%s", isos.items[0]);
             snprintf(pkg_file, sizeof(pkg_file), "%s", PACKAGED_ZIP);
             snprintf(format, sizeof(format), "zip");
-            if (join2(pkg_abs, sizeof(pkg_abs), abs, iso_rel) != 0) {
-                return 0;
+            if (join2(pkg_abs, sizeof(pkg_abs), abs, isos.items[0]) != 0) {
+                rc = 0;
+                goto out;
             }
         } else {
             VLOG_WARN("discover: skipping \"%s\": no zip, iso, or executable",
                       folder);
-            return 0;
+            rc = 0;
+            goto out;
         }
     }
 
@@ -1679,7 +1901,8 @@ process_folder(vapord *app, const char *folder, int *meta_left)
         memset(acc, 0, sizeof(acc));
         if (fingerprint_tree(abs, "", acc) != 0) {
             VLOG_WARN("discover: cannot fingerprint \"%s\"", folder);
-            return 0;
+            rc = 0;
+            goto out;
         }
         vapor_sha256_hex(acc, fingerprint);
         if (stat(abs, &st) == 0) {
@@ -1687,20 +1910,43 @@ process_folder(vapord *app, const char *folder, int *meta_left)
         } else {
             snprintf(version, sizeof(version), "1");
         }
+    } else if (wrap_iso && isos.count > 0) {
+        int64_t max_mtime = 0;
+        size_t  i;
+
+        fingerprint_iso_list(abs, &isos, fingerprint);
+        for (i = 0; i < isos.count; i++) {
+            char iso_abs[VAPORD_PATH_MAX];
+
+            if (join2(iso_abs, sizeof(iso_abs), abs, isos.items[i]) != 0
+                || stat(iso_abs, &st) != 0) {
+                continue;
+            }
+            if (st.st_mtime > max_mtime) {
+                max_mtime = st.st_mtime;
+            }
+        }
+        if (isos.count > 1) {
+            snprintf(version, sizeof(version), "%lld-d%zu", (long long)max_mtime,
+                     isos.count);
+        } else {
+            snprintf(version, sizeof(version), "%lld", (long long)max_mtime);
+        }
     } else {
         if (stat(pkg_abs, &st) != 0) {
-            return 0;
+            rc = 0;
+            goto out;
         }
-        fingerprint_stat(wrap_iso ? "iso-wise3" : format, pkg_rel,
-                         (uint64_t)st.st_size, (int64_t)st.st_mtime,
-                         fingerprint);
+        fingerprint_stat(format, pkg_rel, (uint64_t)st.st_size,
+                         (int64_t)st.st_mtime, fingerprint);
         snprintf(version, sizeof(version), "%lld", (long long)st.st_mtime);
     }
     if (meta.version[0]) {
         if (!vapor_version_is_valid(meta.version)) {
             VLOG_WARN("discover: vapor.json for \"%s\" has an invalid version",
                       folder);
-            return 0;
+            rc = 0;
+            goto out;
         }
         snprintf(version, sizeof(version), "%s", meta.version);
     }
@@ -1741,7 +1987,8 @@ process_folder(vapord *app, const char *folder, int *meta_left)
                        == 1) {
                 (*meta_left)--;
             }
-            return 0;
+            rc = 0;
+            goto out;
         }
     }
 
@@ -1754,9 +2001,13 @@ process_folder(vapord *app, const char *folder, int *meta_left)
         pkg_rel[0] = '\0';
     }
 
-    return publish_game(app, folder, abs, &meta, id, name, version, format,
-                        pkg_rel, pkg_abs, pkg_file, win_exec, lin_exec, strip,
-                        cover_src, fingerprint, wrap_iso || zip_has_iso);
+    rc = publish_game(app, folder, abs, &meta, id, name, version, format,
+                      pkg_rel, pkg_abs, pkg_file, win_exec, lin_exec, strip,
+                      cover_src, fingerprint, wrap_iso || zip_has_iso,
+                      wrap_iso ? &isos : NULL);
+out:
+    strlist_free(&isos);
+    return rc;
 }
 
 static void

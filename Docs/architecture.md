@@ -124,14 +124,22 @@ subdirectory is one game. Discovery runs at startup and then every
 folders are fingerprint-skipped so large archives are not re-hashed.
 
 Zip files already sitting in `library_root` are served in place.
-ISO files are unpacked (ISO 9660 / Joliet). A Wise `SETUP.EXE` on the disc
+ISO files are unpacked (ISO 9660 / Joliet); every image in the folder is
+merged into one tree. A Wise `SETUP.EXE` on the disc
 is unpacked too, and the files are zipped into
-`<content_root>/<game_id>/<version>/package.zip`; the original disc image
-is left in the drop folder. Folders of loose files are zipped into the
+`<content_root>/<game_id>/<version>/package.zip`; the original disc images
+are left in the drop folder. Folders of loose files are zipped into the
 same content path. Disc leftovers are stripped by heuristic: autorun
-files, and a tiny root `*.DAT` only when a larger namesake exists below.
+files and `launch.exe`, and a tiny root `*.DAT` only when a larger namesake exists below.
 Updaters (`upd.exe`, `*up.exe`, `*update.exe`) are not chosen as the
-launch target. Every path segment is validated
+launch target. A leftover `setup.exe` / `.msi` is classified (Inno, NSIS,
+MSI, InstallShield) and silent-installed on the Windows client when that
+family allows it (InstallShield disc kits use the wizard instead, because
+quiet MSI mode hangs); Play appears after the files are tracked. The client
+waits for the installer's real destination to finish copying, not just
+for setup.exe to exit. Play will not
+spawn a SafeDisc/SECDRV wrapper; it looks for a patched or source-port
+exe instead. Every path segment is validated
 so a hostile id or version cannot walk out of the root.
 
 Accounts live only in the server SQLite `users` table (username, Argon2id
@@ -146,7 +154,9 @@ so a catalog read does not block a login write.
 The GUI runs at most one background job. While the job is active the UI
 thread must not call `libvapor`. Refresh builds a pending catalog and the
 UI thread swaps it in after the worker is joined, so the draw loop never
-sees the array being replaced underneath it.
+sees the array being replaced underneath it. Install progress is an
+overall 0–100% of download, hash, extract, disc unpack, and Windows
+setup; the bar is not download-only.
 
 ## Repository layout
 

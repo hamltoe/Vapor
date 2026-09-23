@@ -131,8 +131,17 @@ vapor_net_perform(const vapor_net_req *req, vapor_net_res *res)
         goto cleanup;
     }
 
-    WinHttpAddRequestHeaders(request, L"Accept: application/json", (DWORD)-1,
-                             WINHTTP_ADDREQ_FLAG_ADD);
+    {
+        DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+
+        WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &policy,
+                         sizeof(policy));
+    }
+
+    WinHttpAddRequestHeaders(request,
+                             req->dest_path ? L"Accept: */*"
+                                            : L"Accept: application/json",
+                             (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
     if (req->body) {
         WinHttpAddRequestHeaders(request, L"Content-Type: application/json",
                                  (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);

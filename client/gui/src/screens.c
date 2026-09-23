@@ -89,12 +89,19 @@ vapor_gui_style(struct nk_context *ctx)
 static void
 draw_notice(struct nk_context *ctx, vapor_app *app)
 {
+    float h;
+
     if (!app->notice[0]) {
         return;
     }
-    nk_layout_row_dynamic(ctx, 22, 1);
-    nk_label_colored(ctx, app->notice, NK_TEXT_LEFT,
-                     app->notice_is_error ? COL_BAD_V : COL_GOOD_V);
+    h = strlen(app->notice) > 80 ? 48.0f : 22.0f;
+    nk_layout_row_dynamic(ctx, h, 1);
+    if (h > 22.0f) {
+        nk_label_wrap(ctx, app->notice);
+    } else {
+        nk_label_colored(ctx, app->notice, NK_TEXT_LEFT,
+                         app->notice_is_error ? COL_BAD_V : COL_GOOD_V);
+    }
 }
 
 /* ------------------------------------------------------------ login screen */
@@ -326,11 +333,20 @@ draw_progress(struct nk_context *ctx, vapor_app *app)
 
     nk_layout_row_dynamic(ctx, 20, 1);
     if (total > 0) {
-        char a[32], b[32], line[380];
-        vapor_format_bytes(done, a, sizeof(a));
-        vapor_format_bytes(total, b, sizeof(b));
-        snprintf(line, sizeof(line), "%s   %s of %s  (%d%%)", status, a, b,
-                 (int)((done * 100) / total));
+        int  pct = (int)((done * 100) / total);
+        char line[380];
+
+        if (kind == JOB_INSTALL) {
+            /* Install progress is an overall work fraction, not a byte count. */
+            snprintf(line, sizeof(line), "%s   %d%%",
+                     status[0] ? status : "installing...", pct);
+        } else {
+            char a[32], b[32];
+            vapor_format_bytes(done, a, sizeof(a));
+            vapor_format_bytes(total, b, sizeof(b));
+            snprintf(line, sizeof(line), "%s   %s of %s  (%d%%)", status, a, b,
+                     pct);
+        }
         nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_TEXT_V);
     } else {
         nk_label_colored(ctx, status[0] ? status : "working...", NK_TEXT_LEFT,
@@ -431,7 +447,9 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
     const char     *state;
     struct nk_color state_col;
     struct nk_image cover;
+    struct nk_rect  card_bounds;
     int             open;
+    int             played = 0;
 
     /* A group paints style.window.fixed_background like any other panel, so
      * pushing a different one for the duration is what gives cards a surface
@@ -439,6 +457,11 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
     nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
                              nk_style_item_color(nk_rgb(41, 47, 57)));
     nk_style_push_float(ctx, &ctx->style.window.rounding, 4.0f);
+
+    /* Peek the layout slot in the parent grid *before* the group eats it.
+     * nk_window_get_bounds after group_begin is the outer panel, so every
+     * tile would treat a click as its own and the last game would win. */
+    card_bounds = nk_widget_bounds(ctx);
 
     open = nk_group_begin(ctx, e->id, NK_WINDOW_NO_SCROLLBAR);
     if (!open) {
@@ -453,15 +476,9 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
     } else {
         nk_label_colored(ctx, e->name, NK_TEXT_CENTERED, COL_MUTED_V);
     }
-    if (nk_widget_is_mouse_clicked(ctx, NK_BUTTON_LEFT)) {
-        open_details(app, e->id);
-    }
 
     nk_layout_row_dynamic(ctx, 22, 1);
     nk_label_colored(ctx, e->name, NK_TEXT_LEFT, COL_TEXT_V);
-    if (nk_widget_is_mouse_clicked(ctx, NK_BUTTON_LEFT)) {
-        open_details(app, e->id);
-    }
 
     rating_text(e, rate, sizeof(rate));
     nk_layout_row_dynamic(ctx, 16, 1);
@@ -479,11 +496,14 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
         snprintf(line, sizeof(line), "update from %s", e->installed_version);
         state = line;
         state_col = COL_WARN_V;
+    } else if (e->installed && e->setup_pending) {
+        state = "needs setup";
+        state_col = COL_WARN_V;
     } else if (e->installed) {
         if (e->play_seconds > 0) {
-            char played[64];
-            vapor_format_duration(e->play_seconds, played, sizeof(played));
-            snprintf(line, sizeof(line), "installed   %s played", played);
+            char played_for[64];
+            vapor_format_duration(e->play_seconds, played_for, sizeof(played_for));
+            snprintf(line, sizeof(line), "installed   %s played", played_for);
         } else {
             snprintf(line, sizeof(line), "installed");
         }
@@ -499,9 +519,15 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
     nk_spacing(ctx, 1);
 
     nk_layout_row_dynamic(ctx, ROW_H, 1);
-    if (!busy && e->installed) {
+    if (!busy && e->installed && !e->setup_pending) {
         if (nk_button_label(ctx, "Play")) {
+            played = 1;
             vapor_gui_start_launch(app, e->id);
+        }
+    } else if (!busy && e->installed && e->setup_pending) {
+        if (nk_button_label(ctx, "Setup")) {
+            played = 1;
+            vapor_gui_start_setup(app, e->id);
         }
     } else {
         nk_spacing(ctx, 1);
@@ -510,6 +536,13 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
     nk_group_end(ctx);
     nk_style_pop_float(ctx);
     nk_style_pop_style_item(ctx);
+
+    /* The whole tile opens details. Play is the exception so a launch does
+     * not also navigate away. */
+    if (!played
+        && nk_input_mouse_clicked(&ctx->input, NK_BUTTON_LEFT, card_bounds)) {
+        open_details(app, e->id);
+    }
 }
 
 static float
@@ -597,6 +630,8 @@ draw_detail(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
             snprintf(line, sizeof(line), "update available from %s",
                      e->installed_version);
             nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_WARN_V);
+        } else if (e->installed && e->setup_pending) {
+            nk_label_colored(ctx, "needs setup", NK_TEXT_LEFT, COL_WARN_V);
         } else if (e->installed) {
             if (e->play_seconds > 0) {
                 char played[64];
@@ -665,7 +700,15 @@ draw_detail(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
         return;
     }
 
-    if (e->installed) {
+    if (e->installed && e->setup_pending) {
+        nk_layout_row_dynamic(ctx, ROW_H, 2);
+        if (nk_button_label(ctx, "Setup")) {
+            vapor_gui_start_setup(app, e->id);
+        }
+        if (nk_button_label(ctx, "Remove")) {
+            vapor_gui_start_uninstall(app, e->id);
+        }
+    } else if (e->installed) {
         nk_layout_row_dynamic(ctx, ROW_H, e->update_available ? 4 : 3);
         if (nk_button_label(ctx, "Play")) {
             vapor_gui_start_launch(app, e->id);

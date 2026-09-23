@@ -15,6 +15,13 @@ int vapor_id_is_valid(const char *id);
  * catalog id. Returns 0 and a valid id, or -1 if nothing usable remains. */
 int vapor_id_slug(const char *name, char *out, size_t outsz);
 
+/* Slug of a filename with its last extension removed (`Doom3.exe` -> `doom3`). */
+int vapor_id_slug_stem(const char *name, char *out, size_t outsz);
+
+/* True when two slugs are equal, or equal after dropping hyphens so
+ * `doom-3` matches `doom3`. */
+int vapor_slug_match(const char *a, const char *b);
+
 /* Account names are not path segments, but they are unique keys. 3-32 chars of
  * letters, digits, dot, dash or underscore. Shared by vapord and libvapor so
  * the client rejects locally what the server would reject. */

@@ -212,7 +212,9 @@ static const char LOCAL_SCHEMA[] =
     "  installed_at   INTEGER NOT NULL,"
     "  last_played_at INTEGER NOT NULL DEFAULT 0,"
     "  play_seconds   INTEGER NOT NULL DEFAULT 0,"
-    "  size_on_disk   INTEGER NOT NULL DEFAULT 0"
+    "  size_on_disk   INTEGER NOT NULL DEFAULT 0,"
+    "  setup_pending  INTEGER NOT NULL DEFAULT 0,"
+    "  payload_dir    TEXT NOT NULL DEFAULT ''"
     ");"
     "CREATE TABLE IF NOT EXISTS sessions ("
     "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -296,6 +298,14 @@ vapor_client_open(vapor_client *vc)
         sqlite3_free(emsg);
         return -1;
     }
+    /* Existing libraries created before setup_pending existed. Duplicate
+     * column names are ignored. */
+    sqlite3_exec(vc->db,
+                 "ALTER TABLE installs ADD COLUMN setup_pending INTEGER NOT NULL DEFAULT 0;",
+                 NULL, NULL, NULL);
+    sqlite3_exec(vc->db,
+                 "ALTER TABLE installs ADD COLUMN payload_dir TEXT NOT NULL DEFAULT '';",
+                 NULL, NULL, NULL);
     return 0;
 }
 

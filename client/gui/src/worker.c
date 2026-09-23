@@ -88,7 +88,8 @@ vapor_gui_job_progress(vapor_app *app, char *status, size_t statussz,
 }
 
 /* Progress callback handed to libvapor. Returning non-zero aborts the
- * transfer, which is how the Cancel button takes effect. */
+ * transfer, which is how the Cancel button takes effect. Install reports
+ * overall work here; phase labels arrive through on_status. */
 static int
 on_progress(void *ud, uint64_t done, uint64_t total)
 {
@@ -98,19 +99,22 @@ on_progress(void *ud, uint64_t done, uint64_t total)
     SDL_LockMutex(app->job.lock);
     app->job.done_bytes = done;
     app->job.total_bytes = total;
-    /* An install runs manifest -> download -> verify -> extract behind this one
-     * callback. Inferring the phase from the byte counts keeps the label honest
-     * instead of leaving it on "fetching the manifest" for the whole job. */
-    if (total > 0 && done >= total) {
-        snprintf(app->job.status, sizeof(app->job.status),
-                 "verifying and extracting %s...", app->job.game_id);
-    } else {
-        snprintf(app->job.status, sizeof(app->job.status), "downloading %s...",
-                 app->job.game_id);
-    }
     cancel = app->job.cancel;
     SDL_UnlockMutex(app->job.lock);
     return cancel;
+}
+
+static void
+on_status(void *ud, const char *status)
+{
+    vapor_app *app = (vapor_app *)ud;
+
+    if (!status || !*status) {
+        return;
+    }
+    SDL_LockMutex(app->job.lock);
+    snprintf(app->job.status, sizeof(app->job.status), "%s", status);
+    SDL_UnlockMutex(app->job.lock);
 }
 
 static void
@@ -221,13 +225,13 @@ job_main(void *ud)
 
     case JOB_INSTALL: {
         vapor_install_opts opts;
-        uint64_t           total;
-        char               size[32];
 
         memset(&opts, 0, sizeof(opts));
         /* The UI only ever offers Install or Update, and both should go ahead
          * even when a record already exists. */
         opts.force = 1;
+        opts.on_status = on_status;
+        opts.on_status_ud = app;
         set_status(app, "fetching the manifest for %s...", game_id);
         if (vapor_install_game(vc, game_id, version[0] ? version : "latest",
                                &opts, on_progress, app)
@@ -237,14 +241,26 @@ job_main(void *ud)
             cancelled = app->job.cancel;
             SDL_UnlockMutex(app->job.lock);
             finish(app, cancelled ? 0 : 1, "%s",
-                   cancelled ? "download cancelled" : vc->err);
+                   vc->err[0] ? vc->err
+                              : (cancelled ? "install cancelled" : "install failed"));
             break;
         }
-        SDL_LockMutex(app->job.lock);
-        total = app->job.total_bytes;
-        SDL_UnlockMutex(app->job.lock);
-        vapor_format_bytes(total, size, sizeof(size));
-        finish(app, 0, "installed %s (%s)", game_id, size);
+        {
+            vapor_install rec;
+            char          size[32];
+
+            if (vapor_db_get_install(vc, game_id, &rec) == 0) {
+                vapor_format_bytes(rec.size_on_disk, size, sizeof(size));
+                if (rec.setup_pending) {
+                    finish(app, 0, "downloaded %s (%s); run Setup to finish",
+                           game_id, size);
+                } else {
+                    finish(app, 0, "installed %s (%s)", game_id, size);
+                }
+            } else {
+                finish(app, 0, "installed %s", game_id);
+            }
+        }
         break;
     }
 
@@ -275,7 +291,7 @@ job_main(void *ud)
     case JOB_LAUNCH: {
         int exit_code = 0;
 
-        set_status(app, "%s is running...", game_id);
+        set_status(app, "starting %s...", game_id);
         if (vapor_launch_game(vc, game_id, &exit_code) != 0) {
             finish(app, 1, "%s", vc->err);
             break;
@@ -285,6 +301,25 @@ job_main(void *ud)
         } else {
             finish(app, 0, "%s exited normally", game_id);
         }
+        break;
+    }
+
+    case JOB_SETUP: {
+        int src;
+
+        set_status(app, "running the installer for %s...", game_id);
+        src = vapor_setup_game(vc, game_id);
+        if (src < 0) {
+            finish(app, 1, "%s", vc->err);
+            break;
+        }
+        if (src > 0) {
+            finish(app, 1, "%s",
+                   vc->err[0] ? vc->err
+                              : "installer finished, but the game was not found");
+            break;
+        }
+        finish(app, 0, "%s is ready to play", game_id);
         break;
     }
 
@@ -404,6 +439,12 @@ vapor_gui_start_verify(vapor_app *app, const char *game_id)
 }
 
 int
+vapor_gui_start_setup(vapor_app *app, const char *game_id)
+{
+    return start(app, JOB_SETUP, game_id, NULL, 0);
+}
+
+int
 vapor_gui_start_launch(vapor_app *app, const char *game_id)
 {
     return start(app, JOB_LAUNCH, game_id, NULL, 0);
@@ -451,6 +492,11 @@ vapor_gui_job_poll(vapor_app *app)
             vapor_gui_notice(app, failed, "%s", message);
         }
 
+        /* Install/setup can fail after the kit is already recorded. Refresh
+         * so Setup vs Play matches the database. */
+        if (kind == JOB_INSTALL || kind == JOB_UNINSTALL || kind == JOB_SETUP) {
+            vapor_gui_start_refresh(app);
+        }
         if (failed) {
             return;
         }
@@ -483,7 +529,8 @@ vapor_gui_job_poll(vapor_app *app)
     case JOB_INSTALL:
     case JOB_UNINSTALL:
     case JOB_LAUNCH:
-        /* All three change what the library rows should say. */
+    case JOB_SETUP:
+        /* These change what the library rows should say. */
         vapor_gui_start_refresh(app);
         break;
     default:

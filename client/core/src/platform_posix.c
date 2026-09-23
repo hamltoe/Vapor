@@ -357,4 +357,77 @@ vapor_plat_run(const char *exec, char *const argv[], const char *cwd,
     return 0;
 }
 
+int
+vapor_plat_run_ui(const char *exec, const char *cwd, const char *params,
+                  int *out_exit)
+{
+    char *argv[2];
+
+    argv[0] = (char *)exec;
+    argv[1] = NULL;
+    (void)params;
+    return vapor_plat_run(exec, argv, cwd, NULL, 0, out_exit);
+}
+
+int
+vapor_plat_find_product_dir(const char *name, const char *id, char *out,
+                            size_t outsz)
+{
+    (void)name;
+    (void)id;
+    if (out && outsz) {
+        out[0] = '\0';
+    }
+    return 1;
+}
+
+int
+vapor_plat_guess_product_dir(const char *name, const char *id, char *out,
+                             size_t outsz)
+{
+    return vapor_plat_find_product_dir(name, id, out, outsz);
+}
+
+int
+vapor_plat_search_path(const char *name, char *out, size_t outsz)
+{
+    const char *path, *p, *sep;
+    char        dir[VAPOR_WIN_PATH];
+    char        cand[VAPOR_WIN_PATH];
+    size_t      n;
+
+    if (!name || !*name || !out || outsz == 0) {
+        return 1;
+    }
+    out[0] = '\0';
+    path = getenv("PATH");
+    if (!path) {
+        return 1;
+    }
+    p = path;
+    while (*p) {
+        sep = strchr(p, ':');
+        n = sep ? (size_t)(sep - p) : strlen(p);
+        if (n >= sizeof(dir)) {
+            n = sizeof(dir) - 1;
+        }
+        memcpy(dir, p, n);
+        dir[n] = '\0';
+        if (snprintf(cand, sizeof(cand), "%s/%s", dir[0] ? dir : ".", name)
+            < (int)sizeof(cand)
+            && vapor_plat_exists(cand) && !vapor_plat_is_dir(cand)) {
+            if ((size_t)snprintf(out, outsz, "%s", cand) >= outsz) {
+                out[0] = '\0';
+                return 1;
+            }
+            return 0;
+        }
+        if (!sep) {
+            break;
+        }
+        p = sep + 1;
+    }
+    return 1;
+}
+
 #endif /* !_WIN32 */

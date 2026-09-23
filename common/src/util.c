@@ -76,6 +76,67 @@ vapor_id_slug(const char *name, char *out, size_t outsz)
 }
 
 int
+vapor_id_slug_stem(const char *name, char *out, size_t outsz)
+{
+    char        tmp[256];
+    const char *base;
+    const char *dot;
+    size_t      n;
+
+    if (!name) {
+        return -1;
+    }
+    base = strrchr(name, '/');
+    base = base ? base + 1 : name;
+#if defined(_WIN32)
+    {
+        const char *b = strrchr(base, '\\');
+        if (b) {
+            base = b + 1;
+        }
+    }
+#endif
+    dot = strrchr(base, '.');
+    if (dot && dot != base) {
+        n = (size_t)(dot - base);
+        if (n >= sizeof(tmp)) {
+            n = sizeof(tmp) - 1;
+        }
+        memcpy(tmp, base, n);
+        tmp[n] = '\0';
+        return vapor_id_slug(tmp, out, outsz);
+    }
+    return vapor_id_slug(base, out, outsz);
+}
+
+int
+vapor_slug_match(const char *a, const char *b)
+{
+    char   ca[VAPOR_ID_MAX + 1], cb[VAPOR_ID_MAX + 1];
+    size_t i, oa = 0, ob = 0;
+
+    if (!a || !b) {
+        return 0;
+    }
+    if (strcmp(a, b) == 0) {
+        return 1;
+    }
+    for (i = 0; a[i] && oa + 1 < sizeof(ca); i++) {
+        if (a[i] != '-') {
+            ca[oa++] = a[i];
+        }
+    }
+    ca[oa] = '\0';
+    for (i = 0; b[i] && ob + 1 < sizeof(cb); i++) {
+        if (b[i] != '-') {
+            cb[ob++] = b[i];
+        }
+    }
+    cb[ob] = '\0';
+    return ca[0] && strcmp(ca, cb) == 0;
+}
+
+int
 vapor_username_is_valid(const char *username)
 {
     size_t i, n;

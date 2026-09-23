@@ -42,6 +42,28 @@ int vapor_plat_walk_files(const char *root, vapor_plat_walk_fn fn, void *ud);
 int vapor_plat_run(const char *exec, char *const argv[], const char *cwd,
                    const vapor_kv *env, size_t nenv, int *out_exit);
 
+/* Show a windowed installer and wait until it and any helper processes it
+ * started (msiexec, a second setup.exe, InstallShield engines) have exited.
+ * `params` is the argument string (silent flags, msiexec switches); NULL
+ * means none. On Windows this uses ShellExecuteEx so a required-administrator
+ * manifest can prompt for elevation. */
+int vapor_plat_run_ui(const char *exec, const char *cwd, const char *params,
+                      int *out_exit);
+
+/* Look up a Windows Uninstall entry / Program Files folder matching `name`
+ * or `id`. 0 if `out` was filled, 1 if nothing matched. The folder must
+ * already contain files (an empty InstallShield destination is ignored). */
+int vapor_plat_find_product_dir(const char *name, const char *id, char *out,
+                                size_t outsz);
+
+/* Same lookup, but an empty matching folder is returned so the caller can
+ * wait for the installer to fill it. */
+int vapor_plat_guess_product_dir(const char *name, const char *id, char *out,
+                                 size_t outsz);
+
+/* Resolve `name` on PATH. 0 if `out` is filled. */
+int vapor_plat_search_path(const char *name, char *out, size_t outsz);
+
 /* Path separator normalisation: the manifest always uses '/', Windows APIs
  * mostly accept it, but launching wants native separators. */
 void vapor_plat_native_path(char *path);

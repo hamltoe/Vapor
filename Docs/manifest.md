@@ -69,16 +69,23 @@ If a game later needs symlinks or fine-grained permissions, swap miniz
 for libarchive and package `.tar.zst`. `package.format` already exists
 so zip, iso, and other payloads can coexist.
 
-vapord unpacks each `.iso` / `.img` it finds in `library_root` (ISO 9660
-and Joliet) and zips those files for the client. If the disc includes a
+vapord unpacks each `.iso` / `.img` it finds in a game folder (ISO 9660
+and Joliet) into one tree and zips those files for the client. Several
+disc images in the same folder are merged, later discs overlaying
+same-named files. If a disc includes a
 Wise `SETUP.EXE` (Half-Life GOTY and similar 1999–2003 Sierra installers),
 the packed game files such as `WONAuth.dll` are unpacked into the same
 tree and the installer executable is dropped from the zip. The original
-disc image is left in place. After the client extracts the zip, it
-inspects the install tree and picks a launchable executable (`HL.EXE` on
-a Half-Life disc, for example). Installers and updaters (`setup.exe`,
-`upd.exe`, `*up.exe`, `*update.exe`) are ignored when a real game binary
-is present. A leftover `SETUP.EXE` in an older zip
+disc images are left in place. After the client extracts the zip, it
+inspects the install tree. A portable game binary (`HL.EXE` on a
+Half-Life disc) is launched as-is. A Windows installer kit (`setup.exe`,
+`.msi`, leftover `.iso`) is not treated as the game: the client runs
+that installer locally, then tracks where it placed the files
+(Uninstall registry / Program Files, or an in-place copy) and only then
+shows Play. Files staged under `Setup/` are ignored when picking a
+launch target. Installers, CD autorun stubs (`setup.exe`, `launch.exe`,
+`autorun.exe`), and updaters (`upd.exe`, `*up.exe`, `*update.exe`) are
+ignored when a real game binary is present. A leftover `SETUP.EXE` in an older zip
 is unpacked the same way on install. If the image cannot be unpacked
 (UDF-only DVDs), the ISO is wrapped as a file and the client tries the same
 unpack on install. After a SETUP unpack, autorun files are dropped, and a
@@ -160,11 +167,29 @@ vapord scans `library_root` and publishes each subdirectory. See
 4. Extract a zip with miniz, then inspect the tree for a launchable
    executable or a disc image. Copy an `iso`/`file` payload as-is.
 5. Apply `exec_bits` on Linux when a native target was found.
-6. Record the install in the local SQLite.
+6. Record the install in the local SQLite. If the tree still has a
+   Windows installer (`setup.exe`, `.msi`, leftover `.iso`) and no
+   playable game binary, the client classifies the wrapper (Inno/GOG,
+   NSIS, MSI, InstallShield, or a generic exe), silent-installs into
+   `<library>/<id>/installed` when that family supports it (Inno, NSIS,
+   MSI). InstallShield disc kits skip silent mode: `/s /sms /qn` hangs
+   waiting on msiexec with no window, so the Setup wizard is shown
+   instead. The client waits for helper processes (`msiexec`, IDriver,
+   a second `setup.exe`, …) to exit. Setup.exe's exit code is not enough: many bootstrappers
+   return 0 while the real copy is still running. Vapor then tracks the
+   destination the installer actually created (the silent folder, the
+   Uninstall `InstallLocation`, or Program Files) and treats the install
+   as complete only when that tree has a game executable plus data and
+   has stopped growing. Play is offered only after that. If unattended
+   mode produces no complete tree, the wizard is shown once as a
+   fallback. `vapor setup <id>` retries the same flow.
 
 Verify-before-extract means a truncated download cannot produce a
 half-installed game. `--verify-only` stops after the hash.
-`--force` reinstalls even when the version already matches.
+`--force` reinstalls even when the version already matches. The GUI and
+CLI progress bar tracks this whole pipeline (download, hash, extract,
+disc unpack, Windows setup), not only the HTTP transfer. Cancel is
+honoured between those steps.
 
 ## Launch
 
@@ -175,6 +200,18 @@ Windows does not mix `/` and `\`.
 
 The process is spawned with `CreateProcessW` or `fork` + `execvp`. Start
 and exit time are recorded as playtime.
+
+If the launch target is a SafeDisc (SECDRV) wrapper, Vapor does not run
+it: that DRM cannot load on Windows 10+, and the wrapper's
+"administrator privileges" dialog is not a real login. Play uses an
+unprotected exe in the install folder when one exists. For a Doom 3
+tree (`base/pak000.pk4` + `base/game00.pk4`) it launches dhewm3 against
+those paks, downloading the official Windows build into
+`%LOCALAPPDATA%\Vapor\runtimes\dhewm3` if needed. Other SafeDisc titles
+need the publisher's patch or a source-port exe in the install folder.
+SECDRV.SYS is never enabled. The GUI install job reports extract, then
+the Windows installer; it does not stay on Verify after the download
+finishes.
 
 Launch and verify read the *local* copy of the manifest, so an already
 installed game still runs if the server is unreachable.

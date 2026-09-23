@@ -38,6 +38,25 @@ into `third_party/sdl2` by the vendor script.
 
 Pass `-NoGui` to `build-windows.ps1` only if you must skip SDL2.
 
+## Windows + WSL host
+
+Build vapord in Ubuntu WSL (`scripts/build-linux.sh`), then from PowerShell
+in the repo:
+
+```
+powershell -File scripts/start-wsl-server.ps1
+```
+
+Or double-click `scripts\start-server.cmd`. To put **Vapor Server** on the
+Desktop and Start Menu:
+
+```
+powershell -File scripts/start-wsl-server.ps1 shortcut
+```
+
+The host window needs WSLg. `scripts\stop-server.cmd` stops it. The player
+client is `build-windows\bin\vapor-gui.exe` at `http://127.0.0.1:8777`.
+
 ## First local run
 
 On Linux, in two terminals:
@@ -118,7 +137,8 @@ Point `library_root` at a directory of games (config `library_root`, or
     cover.png             # optional
   Some RPG/
     disc.iso              # unpacked into content_root as package.zip;
-                          # original left in place
+                          # multiple .iso files in the folder are merged;
+                          # originals left in place
   Portable Game/
     Game.exe              # unpacked tree; zipped into content_root
     data/
@@ -129,14 +149,31 @@ Point `library_root` at a directory of games (config `library_root`, or
 
 The folder name becomes the catalog title; a slug of that name is the
 id (`Hollow Knight` → `hollow-knight`). Discovery prefers a zip, then
-an unpacked executable tree, then an ISO. An ISO is unpacked (ISO 9660 /
-Joliet). If the disc ships a Wise installer, that is unpacked too and
-those files are zipped; the original disc image is left in
-the drop folder. After unpack, `autorun.exe` / `autorun.inf` are dropped.
-A tiny root `*.DAT` is removed only when a larger file of the same name
-exists in a subdirectory (a CD volume stub next to real data). Launch
-picking ignores installers plus updaters named `upd.exe`, `*up.exe`, or
-`*update.exe`.
+an unpacked executable tree, then an ISO. Every `.iso` / `.img` in the
+folder is unpacked (ISO 9660 / Joliet) into one tree, so a three-disc
+set like Doom 3 is merged. If the disc ships a Wise installer, that is
+unpacked too and those files are zipped; the original disc images are
+left in the drop folder. After unpack, `autorun.exe` / `autorun.inf` are
+dropped. A tiny root `*.DAT` is removed only when a larger file of the
+same name exists in a subdirectory (a CD volume stub next to real data).
+Launch picking ignores installers, CD autorun stubs named `launch.exe`,
+plus updaters named `upd.exe`, `*up.exe`, or `*update.exe`. Files under
+`Setup/` are installer staging, not a finished install. When the client
+still has a `setup.exe` or `.msi` after extract, it runs that wizard
+locally and records the real install location before Play is offered.
+The install is complete only when that destination (silent folder, or
+the Uninstall / Program Files path the wizard created) has a game
+binary plus data and has stopped growing — not merely because
+setup.exe returned 0. InstallShield disc kits skip silent `/qn` (it
+hangs on msiexec with no window) and show the Setup wizard instead.
+Play refuses SafeDisc/SECDRV wrappers (the fake administrator-login
+dialog those exes show on Windows 10+) and looks for a patched exe or
+a Doom 3 source port (`dhewm3`) instead. On Windows, first Play of a
+retail Doom 3 tree downloads the official dhewm3 build into
+`%LOCALAPPDATA%\Vapor\runtimes\dhewm3` when it is not already present.
+The GUI status during Install is download → extract → Windows
+installer; a full progress bar after the zip lands is extract/setup,
+not Verify.
 
 After a folder is published, vapord asks Steam for cover art, a short
 description, and the public review score when those fields are empty.
@@ -238,6 +275,7 @@ before anyone types a password.
 
 - Per-user entitlements (every signed-in user sees every game).
 - Wine / Proton launches (`targets[].runtime` is reserved for that).
+- Enabling SafeDisc (`SECDRV.SYS`) on modern Windows.
 - Cloud saves, friends, or a storefront.
 - Windows-hosted vapord.
 - Automatic client self-update.

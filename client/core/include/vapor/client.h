@@ -68,13 +68,21 @@ int vapor_api_post(vapor_client *vc, const char *path, const char *json_body,
 int vapor_api_put(vapor_client *vc, const char *path, const char *json_body,
                   int auth, vapor_response *out);
 
-/* Return non-zero to abort the transfer. */
+/* Return non-zero to abort. `done`/`total` are an overall work fraction for
+ * install (download through setup), not download bytes alone. */
 typedef int (*vapor_progress_fn)(void *ud, uint64_t done, uint64_t total);
+/* Optional phase label while install runs (download, verify, extract, setup). */
+typedef void (*vapor_status_fn)(void *ud, const char *status);
 
 /* Resumable GET straight to `dest_path`. If the file already exists it is
  * continued with a Range request rather than restarted. */
 int vapor_http_download(vapor_client *vc, const char *path,
                         const char *dest_path, vapor_progress_fn cb, void *ud);
+
+/* GET an absolute https URL to `dest_path` (no vapord session). Used for
+ * public source-port runtimes. */
+int vapor_http_fetch_url(vapor_client *vc, const char *url,
+                         const char *dest_path, vapor_progress_fn cb, void *ud);
 
 /* -------------------------------------------------------------------- auth */
 typedef struct {
@@ -116,6 +124,7 @@ typedef struct {
      * the server have" and "what do I have". */
     int      installed;
     char     installed_version[VAPOR_VERSION_MAX + 1];
+    int      setup_pending;
     int      update_available;
     int64_t  play_seconds;
     int      has_cover;
@@ -167,6 +176,8 @@ typedef struct {
     int64_t last_played_at;
     int64_t play_seconds;
     uint64_t size_on_disk;
+    int      setup_pending; /* 1 until a Windows installer has been run and tracked */
+    char     payload_dir[VAPOR_PATH_MAX]; /* downloaded kit; empty means install_dir */
 } vapor_install;
 
 int vapor_db_record_install(vapor_client *vc, const vapor_install *rec);
@@ -183,14 +194,25 @@ typedef struct {
     int   verify_only;
     int   force;          /* reinstall even if the version already matches */
     int   keep_download;  /* leave the archive in the cache after extracting */
+    vapor_status_fn on_status;
+    void           *on_status_ud;
 } vapor_install_opts;
 
 /* Fetches the manifest for `game_id` at `version` ("latest" is resolved by the
- * server), downloads, verifies, extracts, and records the install. */
+ * server), downloads, verifies, extracts, and records the install. `cb`
+ * reports overall install progress (not only the HTTP transfer). */
 int vapor_install_game(vapor_client *vc, const char *game_id,
                        const char *version, const vapor_install_opts *opts,
                        vapor_progress_fn cb, void *ud);
 int vapor_uninstall_game(vapor_client *vc, const char *game_id);
+
+/* Run a Windows installer that was downloaded into the payload directory,
+ * then record where it placed the game. 0 if the title is playable, 1 if the
+ * installer did not finish (setup still pending; vc->err explains), -1 on
+ * error. Completion is the destination tree (requested silent folder, or the
+ * Uninstall / Program Files path the installer created), not the process
+ * exit code alone. */
+int vapor_setup_game(vapor_client *vc, const char *game_id);
 
 /* Fetch and parse a manifest without installing. Caller frees via
  * vapor_manifest_free. */
@@ -208,7 +230,9 @@ int vapor_verify_install(vapor_client *vc, const char *game_id);
 
 /* ------------------------------------------------------------------ launch */
 /* Runs the game and blocks until it exits. *out_exit gets the process exit
- * code. Playtime is recorded automatically. */
+ * code. Playtime is recorded automatically. Copy-protected disc wrappers
+ * (SafeDisc/SECDRV) are not spawned; a patched or source-port exe is used
+ * when one is present. */
 int vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit);
 
 #endif /* VAPOR_CLIENT_H */

@@ -144,7 +144,9 @@ vapor_net_perform(const vapor_net_req *req, vapor_net_res *res)
         prog.base = req->resume_from;
     }
 
-    headers = curl_slist_append(headers, "Accept: application/json");
+    headers = curl_slist_append(headers,
+                                req->dest_path ? "Accept: */*"
+                                               : "Accept: application/json");
     if (req->body) {
         headers = curl_slist_append(headers, "Content-Type: application/json");
     }

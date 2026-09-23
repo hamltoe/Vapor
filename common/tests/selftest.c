@@ -162,6 +162,15 @@ test_id_slug(void)
     check(vapor_id_slug("123", id, sizeof(id)) == 0 && strcmp(id, "123") == 0,
           "digits kept");
     check(vapor_id_is_valid(id), "slug is a valid id");
+    check(vapor_id_slug_stem("Doom3.exe", id, sizeof(id)) == 0
+              && strcmp(id, "doom3") == 0,
+          "stem drops .exe");
+    check(vapor_id_slug_stem("Setup/Data/Doom3.exe", id, sizeof(id)) == 0
+              && strcmp(id, "doom3") == 0,
+          "stem uses the basename");
+    check(vapor_slug_match("doom-3", "doom3"), "hyphens ignored");
+    check(vapor_slug_match("doom3", "doom3"), "exact slug");
+    check(!vapor_slug_match("doom3", "demo32"), "different stems");
 }
 
 static void
@@ -378,6 +387,62 @@ dirent_dot(unsigned char *p, uint32_t lba, uint32_t size, int parent)
     p[33] = parent ? 1 : 0;
 }
 
+static int
+write_min_iso(const char *path, const char *ident, const char *payload)
+{
+    unsigned char  img[2048 * 20];
+    unsigned char *pvd, *root, *file_rec;
+    FILE          *f;
+    size_t         ident_len, payload_len;
+
+    ident_len = strlen(ident);
+    payload_len = strlen(payload);
+    if (ident_len == 0 || ident_len > 32 || payload_len >= 2048) {
+        return -1;
+    }
+
+    memset(img, 0, sizeof(img));
+    pvd = img + 16 * 2048;
+    pvd[0] = 1;
+    memcpy(pvd + 1, "CD001", 5);
+    pvd[6] = 1;
+    memcpy(pvd + 40, "VAPORTEST", 9);
+    both32(pvd + 80, 20);
+    both16(pvd + 128, 2048);
+    dirent_dot(pvd + 156, 18, 2048, 0);
+
+    img[17 * 2048] = 255;
+    memcpy(img + 17 * 2048 + 1, "CD001", 5);
+    img[17 * 2048 + 6] = 1;
+
+    root = img + 18 * 2048;
+    dirent_dot(root, 18, 2048, 0);
+    dirent_dot(root + 34, 18, 2048, 1);
+    file_rec = root + 68;
+    memset(file_rec, 0, 48);
+    file_rec[0] = (unsigned char)(33 + ident_len);
+    if (file_rec[0] < 34) {
+        file_rec[0] = 34;
+    }
+    both32(file_rec + 2, 19);
+    both32(file_rec + 10, (uint32_t)payload_len);
+    file_rec[32] = (unsigned char)ident_len;
+    memcpy(file_rec + 33, ident, ident_len);
+
+    memcpy(img + 19 * 2048, payload, payload_len);
+
+    f = fopen(path, "wb");
+    if (!f) {
+        return -1;
+    }
+    if (fwrite(img, 1, sizeof(img), f) != sizeof(img)) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    return 0;
+}
+
 static void
 test_iso9660(void)
 {
@@ -442,6 +507,54 @@ test_iso9660(void)
     }
     remove(out_file);
     remove(iso_path);
+#if defined(_WIN32)
+    _rmdir(out_dir);
+#else
+    rmdir(out_dir);
+#endif
+}
+
+static void
+test_iso9660_merge(void)
+{
+    char         err[128];
+    char         got[32];
+    FILE        *f;
+    const char  *out_dir = "vapor-iso-merge-out";
+    const char  *a_path = "vapor-iso-merge-a.iso";
+    const char  *b_path = "vapor-iso-merge-b.iso";
+    const char  *a_file = "vapor-iso-merge-out/DISC1.TXT";
+    const char  *b_file = "vapor-iso-merge-out/DISC2.TXT";
+
+    puts("iso9660-merge");
+    check(write_min_iso(a_path, "DISC1.TXT;1", "from-disc-1\n") == 0,
+          "writes first test ISO");
+    check(write_min_iso(b_path, "DISC2.TXT;1", "from-disc-2\n") == 0,
+          "writes second test ISO");
+    check(vapor_iso_extract(a_path, out_dir, err, sizeof(err)) == 0,
+          "extracts first disc");
+    check(vapor_iso_extract(b_path, out_dir, err, sizeof(err)) == 0,
+          "extracts second disc into the same tree");
+    f = fopen(a_file, "rb");
+    check(f != NULL, "merged DISC1.TXT");
+    if (f) {
+        size_t n = fread(got, 1, sizeof(got) - 1, f);
+        got[n] = '\0';
+        fclose(f);
+        check(strcmp(got, "from-disc-1\n") == 0, "first disc file kept");
+    }
+    f = fopen(b_file, "rb");
+    check(f != NULL, "merged DISC2.TXT");
+    if (f) {
+        size_t n = fread(got, 1, sizeof(got) - 1, f);
+        got[n] = '\0';
+        fclose(f);
+        check(strcmp(got, "from-disc-2\n") == 0, "second disc file added");
+    }
+    remove(a_file);
+    remove(b_file);
+    remove(a_path);
+    remove(b_path);
 #if defined(_WIN32)
     _rmdir(out_dir);
 #else
@@ -704,6 +817,7 @@ main(void)
     test_buf();
     test_manifest_roundtrip();
     test_iso9660();
+    test_iso9660_merge();
     test_wise();
     test_disc_finish_install();
 

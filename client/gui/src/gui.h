@@ -47,6 +47,7 @@ typedef enum {
     JOB_UNINSTALL,
     JOB_VERIFY,
     JOB_LAUNCH,
+    JOB_SETUP,
     JOB_RATE
 } vapor_job_kind;
 
@@ -63,7 +64,7 @@ typedef struct {
     char     version[VAPOR_VERSION_MAX + 1];
     char     status[256];       /* what the job is doing, shown in the UI */
     char     message[512];      /* the outcome, shown when it finishes */
-    uint64_t done_bytes;
+    uint64_t done_bytes;        /* overall work done (bytes for downloads, ticks for install) */
     uint64_t total_bytes;
     int      rating_score;      /* JOB_RATE input */
     double   rating_avg;        /* JOB_RATE result */
@@ -140,6 +141,7 @@ int  vapor_gui_start_install(vapor_app *app, const char *game_id,
                              const char *version);
 int  vapor_gui_start_uninstall(vapor_app *app, const char *game_id);
 int  vapor_gui_start_verify(vapor_app *app, const char *game_id);
+int  vapor_gui_start_setup(vapor_app *app, const char *game_id);
 int  vapor_gui_start_launch(vapor_app *app, const char *game_id);
 int  vapor_gui_start_rate(vapor_app *app, const char *game_id, int score);
 
