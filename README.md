@@ -284,7 +284,7 @@ vapor info my-game           # versions, install path, playtime
 vapor installed              # local library
 vapor setup my-game          # retry a Windows installer that is still pending
 vapor verify my-game         # check an install against its manifest
-vapor uninstall my-game
+vapor uninstall my-game      # runs the game's uninstaller, then deletes its folders
 vapor logout
 vapor config                 # print config path, server, library dir
 ```

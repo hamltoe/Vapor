@@ -26,11 +26,12 @@
 #include "nuklear_sdl_gl2.h"
 
 #define HOST_W  760
-#define HOST_H  560
+#define HOST_H  640
 #define LOG_N   28
 #define LOG_W   280
 #define TITLE_N 48
 #define TITLE_W 96
+#define CMD_N   128
 
 typedef struct {
     char               lines[LOG_N][LOG_W];
@@ -44,6 +45,8 @@ typedef struct {
     int64_t            games;
     char               titles[TITLE_N][TITLE_W];
     size_t             ntitles;
+    char               cmd[CMD_N];
+    int                cmd_len;
 } host_ui;
 
 static void
@@ -93,6 +96,107 @@ refresh_stats(host_ui *ui)
     vapord_game_count(ui->app->db, &ui->games);
     vapord_game_titles(ui->app->db, (char *)ui->titles, TITLE_W, TITLE_N,
                        &ui->ntitles);
+}
+
+static void
+skip_spaces(char **p)
+{
+    while (**p == ' ' || **p == '\t') {
+        (*p)++;
+    }
+}
+
+static void
+cmd_remove_game(host_ui *ui, const char *id)
+{
+    char folder[256];
+    int  rc;
+
+    if (!id || !id[0] || !vapor_id_is_valid(id)) {
+        VLOG_WARN("command: remove needs a game id (the first column in Games)");
+        return;
+    }
+    folder[0] = '\0';
+    (void)vapord_discovered_by_id(ui->app->db, id, folder, sizeof(folder));
+    rc = vapord_game_delete(ui->app->db, id);
+    if (rc < 0) {
+        VLOG_ERROR("command: could not remove %s", id);
+        return;
+    }
+    if (rc == 1) {
+        VLOG_WARN("command: no such game \"%s\"", id);
+        return;
+    }
+    if (folder[0]) {
+        vapord_discovered_delete(ui->app->db, folder);
+    }
+    VLOG_INFO("command: removed %s from the catalog", id);
+    if (folder[0] && ui->app->cfg.library_root[0]) {
+        VLOG_WARN("command: folder \"%s\" is still under %s", folder,
+                  ui->app->cfg.library_root);
+        VLOG_WARN("command: move that folder out or the next scan will "
+                  "publish %s again",
+                  id);
+    }
+    refresh_stats(ui);
+}
+
+static void
+cmd_list_games(host_ui *ui)
+{
+    int i;
+
+    refresh_stats(ui);
+    if (ui->ntitles == 0) {
+        VLOG_INFO("command: catalog is empty");
+        return;
+    }
+    for (i = 0; i < (int)ui->ntitles; i++) {
+        VLOG_INFO("command: %s", ui->titles[i]);
+    }
+}
+
+static void
+run_host_command(host_ui *ui)
+{
+    char  buf[CMD_N];
+    char *p;
+    char *arg;
+
+    snprintf(buf, sizeof(buf), "%s", ui->cmd);
+    p = buf;
+    skip_spaces(&p);
+    if (!p[0]) {
+        return;
+    }
+    arg = p;
+    while (*arg && *arg != ' ' && *arg != '\t') {
+        arg++;
+    }
+    if (*arg) {
+        *arg++ = '\0';
+        skip_spaces(&arg);
+    }
+    if (ui->scanning && strcmp(p, "help") != 0) {
+        VLOG_WARN("command: a scan is still running");
+        return;
+    }
+    VLOG_INFO("command: %s%s%s", p, arg[0] ? " " : "", arg);
+    if (strcmp(p, "help") == 0) {
+        VLOG_INFO("commands: discover, list, remove ID");
+    } else if (strcmp(p, "discover") == 0) {
+        if (!ui->app->cfg.library_root[0]) {
+            VLOG_WARN("command: library_root is not set");
+            return;
+        }
+        request_scan(ui);
+    } else if (strcmp(p, "list") == 0) {
+        cmd_list_games(ui);
+    } else if (strcmp(p, "remove") == 0) {
+        cmd_remove_game(ui, arg);
+    } else {
+        VLOG_WARN("command: unknown \"%s\" (try help)", p);
+    }
 }
 
 static void
@@ -262,8 +366,37 @@ vapord_gui_run(vapord *app, volatile int *stop)
             }
 
             nk_layout_row_dynamic(ctx, 18, 1);
+            nk_label(ctx, "Command", NK_TEXT_LEFT);
+            nk_layout_row_template_begin(ctx, 28);
+            nk_layout_row_template_push_dynamic(ctx);
+            nk_layout_row_template_push_static(ctx, 72);
+            nk_layout_row_template_end(ctx);
+            {
+                nk_flags edited;
+
+                edited = nk_edit_string(ctx, NK_EDIT_FIELD | NK_EDIT_SIG_ENTER,
+                                        ui.cmd, &ui.cmd_len, CMD_N,
+                                        nk_filter_ascii);
+                if (nk_button_label(ctx, "Run")
+                    || (edited & NK_EDIT_COMMITED)) {
+                    if (ui.cmd_len < 0) {
+                        ui.cmd_len = 0;
+                    }
+                    if (ui.cmd_len >= CMD_N) {
+                        ui.cmd_len = CMD_N - 1;
+                    }
+                    ui.cmd[ui.cmd_len] = '\0';
+                    run_host_command(&ui);
+                    ui.cmd_len = 0;
+                    ui.cmd[0] = '\0';
+                }
+            }
+            nk_layout_row_dynamic(ctx, 16, 1);
+            nk_label(ctx, "discover    list    remove ID", NK_TEXT_LEFT);
+
+            nk_layout_row_dynamic(ctx, 18, 1);
             nk_label(ctx, "Games", NK_TEXT_LEFT);
-            nk_layout_row_dynamic(ctx, 140, 1);
+            nk_layout_row_dynamic(ctx, 110, 1);
             if (nk_group_begin(ctx, "games", NK_WINDOW_BORDER)) {
                 nk_layout_row_dynamic(ctx, 20, 1);
                 if (ui.ntitles == 0) {
@@ -278,7 +411,7 @@ vapord_gui_run(vapord *app, volatile int *stop)
 
             nk_layout_row_dynamic(ctx, 18, 1);
             nk_label(ctx, "Log", NK_TEXT_LEFT);
-            nk_layout_row_dynamic(ctx, 160, 1);
+            nk_layout_row_dynamic(ctx, 130, 1);
             if (nk_group_begin(ctx, "log", NK_WINDOW_BORDER)) {
                 nk_layout_row_dynamic(ctx, 18, 1);
                 pthread_mutex_lock(&ui.mu);

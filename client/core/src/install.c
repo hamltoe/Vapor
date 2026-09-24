@@ -2046,39 +2046,249 @@ vapor_setup_game(vapor_client *vc, const char *game_id)
     return setup_game_impl(vc, game_id, NULL);
 }
 
+typedef struct {
+    char path[VAPOR_PATH_MAX];
+    int  score;
+} local_uninst;
+
+static int
+local_uninst_cb(const char *rel, const char *abs, void *ud)
+{
+    local_uninst *h = ud;
+    const char   *base;
+    int           score = 0;
+
+    if (strchr(rel, '/')) {
+        return 0;
+    }
+    base = path_basename(rel);
+    if (vapor_str_eq_ci(base, "unins000.exe")) {
+        score = 3;
+    } else if (vapor_str_has_prefix(base, "unins")
+               && vapor_str_ends_with_ci(base, ".exe")) {
+        score = 2;
+    } else if (vapor_str_eq_ci(base, "uninstall.exe")
+               || vapor_str_eq_ci(base, "uninstaller.exe")) {
+        score = 1;
+    }
+    if (score > h->score && (size_t)strlen(abs) < sizeof(h->path)) {
+        snprintf(h->path, sizeof(h->path), "%s", abs);
+        h->score = score;
+    }
+    return 0;
+}
+
+static int
+find_local_uninstaller(const char *dir, char *out, size_t outsz)
+{
+    local_uninst h;
+
+    if (!dir || !dir[0] || !vapor_plat_is_dir(dir) || !out || outsz == 0) {
+        return 1;
+    }
+    memset(&h, 0, sizeof(h));
+    h.score = -1;
+    if (vapor_plat_walk_files(dir, local_uninst_cb, &h) != 0 && h.score < 0) {
+        return 1;
+    }
+    if (h.score < 0) {
+        return 1;
+    }
+    if ((size_t)snprintf(out, outsz, "%s", h.path) >= outsz) {
+        return 1;
+    }
+    return 0;
+}
+
+static void
+trim_trailing_sep(char *s)
+{
+    size_t n = strlen(s);
+
+    while (n > 0 && (s[n - 1] == '/' || s[n - 1] == '\\')) {
+        s[--n] = '\0';
+    }
+}
+
+static int
+paths_same(const char *a, const char *b)
+{
+    char   aa[VAPOR_PATH_MAX];
+    char   bb[VAPOR_PATH_MAX];
+    size_t i;
+
+    if (!a || !b || !a[0] || !b[0]) {
+        return 0;
+    }
+    snprintf(aa, sizeof(aa), "%s", a);
+    snprintf(bb, sizeof(bb), "%s", b);
+    vapor_plat_native_path(aa);
+    vapor_plat_native_path(bb);
+    trim_trailing_sep(aa);
+    trim_trailing_sep(bb);
+    for (i = 0; aa[i]; i++) {
+        if (aa[i] >= 'A' && aa[i] <= 'Z') {
+            aa[i] = (char)(aa[i] - 'A' + 'a');
+        }
+    }
+    for (i = 0; bb[i]; i++) {
+        if (bb[i] >= 'A' && bb[i] <= 'Z') {
+            bb[i] = (char)(bb[i] - 'A' + 'a');
+        }
+    }
+    return strcmp(aa, bb) == 0;
+}
+
+/* Refuse drive roots and the Windows directories themselves. A game folder
+ * under Program Files is fine; Program Files is not. */
+static int
+removal_is_safe(const char *path, const char *library)
+{
+    char        tmp[VAPOR_PATH_MAX];
+    const char *base;
+
+    if (!path || !path[0]) {
+        return 0;
+    }
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    vapor_plat_native_path(tmp);
+    trim_trailing_sep(tmp);
+    if (strlen(tmp) < 4) {
+        return 0;
+    }
+    if (library && library[0] && paths_same(tmp, library)) {
+        return 0;
+    }
+    base = path_basename(tmp);
+    if (vapor_str_eq_ci(base, "Program Files")
+        || vapor_str_eq_ci(base, "Program Files (x86)")
+        || vapor_str_eq_ci(base, "Windows")
+        || vapor_str_eq_ci(base, "Users")
+        || vapor_str_eq_ci(base, "ProgramData")) {
+        return 0;
+    }
+    return 1;
+}
+
+static int
+remove_install_tree(vapor_client *vc, const char *path)
+{
+    char native[VAPOR_PATH_MAX];
+
+    if (!path || !path[0]) {
+        return 0;
+    }
+    snprintf(native, sizeof(native), "%s", path);
+    vapor_plat_native_path(native);
+    trim_trailing_sep(native);
+    if (!removal_is_safe(native, vc->cfg.library_dir)) {
+        return 0;
+    }
+    if (!vapor_plat_exists(native)) {
+        return 0;
+    }
+    printf("removing %s\n", native);
+    if (vapor_plat_remove_tree(native) != 0) {
+        vapor_client_set_error(vc, "cannot remove %s", native);
+        return -1;
+    }
+    return 0;
+}
+
 int
 vapor_uninstall_game(vapor_client *vc, const char *game_id)
 {
     vapor_install rec;
-    char          install_dir[VAPOR_PATH_MAX];
+    char          library_dir[VAPOR_PATH_MAX];
+    char          exe[VAPOR_PATH_MAX];
+    char          params[2048];
+    char          product_dir[VAPOR_PATH_MAX];
+    char          cwd[VAPOR_PATH_MAX];
+    int           exit_code = 0;
 
     if (vapor_db_get_install(vc, game_id, &rec) != 0) {
         vapor_client_set_error(vc, "%s is not installed", game_id);
         return -1;
     }
-    if (install_dir_for(vc, game_id, install_dir, sizeof(install_dir)) != 0) {
+    if (install_dir_for(vc, game_id, library_dir, sizeof(library_dir)) != 0) {
         return -1;
     }
 
-    /* Always drop Vapor's downloaded kit. A Windows installer may have copied
-     * the game into Program Files; that tree is left for the OS uninstaller. */
-    if (vapor_plat_exists(install_dir)
-        && vapor_plat_remove_tree(install_dir) != 0) {
-        vapor_client_set_error(vc, "cannot remove %s", install_dir);
-        return -1;
+    exe[0] = params[0] = product_dir[0] = '\0';
+    if (vapor_plat_find_uninstall(rec.name, rec.game_id, rec.install_dir, exe,
+                                  sizeof(exe), params, sizeof(params),
+                                  product_dir, sizeof(product_dir))
+        != 0) {
+        if (find_local_uninstaller(rec.install_dir, exe, sizeof(exe)) != 0
+            && find_local_uninstaller(rec.payload_dir, exe, sizeof(exe)) != 0
+            && find_local_uninstaller(library_dir, exe, sizeof(exe)) != 0) {
+            exe[0] = '\0';
+        }
     }
-    if (rec.payload_dir[0] && strcmp(rec.payload_dir, install_dir) != 0
-        && vapor_str_has_prefix(rec.payload_dir, vc->cfg.library_dir)
-        && vapor_plat_exists(rec.payload_dir)
-        && vapor_plat_remove_tree(rec.payload_dir) != 0) {
-        vapor_client_set_error(vc, "cannot remove %s", rec.payload_dir);
-        return -1;
+
+    /* A Windows installer copies the game into Program Files and adds an
+     * Add/Remove Programs entry. Deleting Vapor's folder does not remove
+     * that entry. InstallShield also publishes a second key with the same
+     * name and an empty uninstall command; the real command is the other
+     * key (IDriver.exe /M{GUID}). */
+    if (!exe[0]) {
+        char listed[VAPOR_PATH_MAX];
+
+        listed[0] = '\0';
+        if (vapor_plat_find_product_dir(rec.name, rec.game_id, listed,
+                                        sizeof(listed))
+            == 0) {
+            vapor_client_set_error(vc,
+                                   "Windows still lists %s at %s, and Vapor "
+                                   "could not find its uninstaller. The game "
+                                   "was left installed",
+                                   rec.name[0] ? rec.name : game_id, listed);
+            return -1;
+        }
     }
-    if (rec.install_dir[0] && strcmp(rec.install_dir, install_dir) != 0
-        && vapor_str_has_prefix(rec.install_dir, vc->cfg.library_dir)
-        && vapor_plat_exists(rec.install_dir)
-        && vapor_plat_remove_tree(rec.install_dir) != 0) {
-        vapor_client_set_error(vc, "cannot remove %s", rec.install_dir);
+
+    if (exe[0]) {
+        char still_exe[VAPOR_PATH_MAX];
+        char still_params[2048];
+        char still_dir[VAPOR_PATH_MAX];
+
+        path_dirname(exe, cwd, sizeof(cwd));
+        printf("running uninstaller %s%s%s\n", exe, params[0] ? " " : "",
+               params);
+        fflush(stdout);
+        if (vapor_plat_run_ui(exe, cwd, params[0] ? params : NULL, &exit_code)
+            != 0) {
+            vapor_client_set_error(vc, "could not start uninstaller %s", exe);
+            return -1;
+        }
+        /* 3010 is Windows' "success, reboot required". */
+        if (exit_code != 0 && exit_code != 3010) {
+            vapor_client_set_error(vc,
+                                   "uninstaller for %s exited (%d); the "
+                                   "installed files were left in place",
+                                   rec.name[0] ? rec.name : game_id, exit_code);
+            return -1;
+        }
+        /* The maintenance window can return 0 on Cancel or Repair. */
+        still_exe[0] = still_params[0] = still_dir[0] = '\0';
+        if (vapor_plat_find_uninstall(rec.name, rec.game_id, rec.install_dir,
+                                      still_exe, sizeof(still_exe), still_params,
+                                      sizeof(still_params), still_dir,
+                                      sizeof(still_dir))
+            == 0) {
+            vapor_client_set_error(vc,
+                                   "Windows still lists %s. Its uninstaller "
+                                   "did not remove the Add/Remove Programs "
+                                   "entry, so the game was left installed",
+                                   rec.name[0] ? rec.name : game_id);
+            return -1;
+        }
+    }
+
+    if (remove_install_tree(vc, product_dir) != 0
+        || remove_install_tree(vc, rec.install_dir) != 0
+        || remove_install_tree(vc, rec.payload_dir) != 0
+        || remove_install_tree(vc, library_dir) != 0) {
         return -1;
     }
 

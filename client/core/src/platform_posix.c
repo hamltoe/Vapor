@@ -430,4 +430,35 @@ vapor_plat_search_path(const char *name, char *out, size_t outsz)
     return 1;
 }
 
+int
+vapor_plat_find_uninstall(const char *name, const char *id,
+                          const char *install_dir, char *out_exe, size_t exesz,
+                          char *out_params, size_t paramsz, char *out_dir,
+                          size_t dirsz)
+{
+    (void)name;
+    (void)id;
+    (void)install_dir;
+    if (out_exe && exesz) {
+        out_exe[0] = '\0';
+    }
+    if (out_params && paramsz) {
+        out_params[0] = '\0';
+    }
+    if (out_dir && dirsz) {
+        out_dir[0] = '\0';
+    }
+    return 1;
+}
+
+int
+vapor_plat_missing_dlls(const char *exe, char *out, size_t outsz)
+{
+    (void)exe;
+    if (out && outsz) {
+        out[0] = '\0';
+    }
+    return 0;
+}
+
 #endif /* !_WIN32 */

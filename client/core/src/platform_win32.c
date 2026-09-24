@@ -1012,4 +1012,619 @@ vapor_plat_guess_product_dir(const char *name, const char *id, char *out,
     return find_product_dir_ex(name, id, out, outsz, 0);
 }
 
+static int
+file_exists_non_dir(const char *path)
+{
+    DWORD attrs;
+
+    if (!path || !path[0]) {
+        return 0;
+    }
+    attrs = GetFileAttributesA(path);
+    return attrs != INVALID_FILE_ATTRIBUTES
+           && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+static int
+contains_ci(const char *hay, const char *needle)
+{
+    size_t nlen, i, j;
+
+    if (!hay || !needle) {
+        return 0;
+    }
+    nlen = strlen(needle);
+    if (nlen == 0) {
+        return 0;
+    }
+    for (i = 0; hay[i]; i++) {
+        for (j = 0; j < nlen; j++) {
+            unsigned char a = (unsigned char)hay[i + j];
+            unsigned char b = (unsigned char)needle[j];
+
+            if (a == 0) {
+                return 0;
+            }
+            if (a >= 'A' && a <= 'Z') {
+                a = (unsigned char)(a - 'A' + 'a');
+            }
+            if (b >= 'A' && b <= 'Z') {
+                b = (unsigned char)(b - 'A' + 'a');
+            }
+            if (a != b) {
+                break;
+            }
+        }
+        if (j == nlen) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int
+has_prefix_ci(const char *s, const char *prefix)
+{
+    size_t i;
+
+    if (!s || !prefix) {
+        return 0;
+    }
+    for (i = 0; prefix[i]; i++) {
+        unsigned char a = (unsigned char)s[i];
+        unsigned char b = (unsigned char)prefix[i];
+
+        if (a == 0) {
+            return 0;
+        }
+        if (a >= 'A' && a <= 'Z') {
+            a = (unsigned char)(a - 'A' + 'a');
+        }
+        if (b >= 'A' && b <= 'Z') {
+            b = (unsigned char)(b - 'A' + 'a');
+        }
+        if (a != b) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int
+paths_equal_ci(const char *a, const char *b)
+{
+    char           aa[VAPOR_WIN_PATH];
+    char           bb[VAPOR_WIN_PATH];
+    unsigned char *p;
+
+    if (!a || !b || !a[0] || !b[0]) {
+        return 0;
+    }
+    snprintf(aa, sizeof(aa), "%s", a);
+    snprintf(bb, sizeof(bb), "%s", b);
+    vapor_plat_native_path(aa);
+    vapor_plat_native_path(bb);
+    trim_slash(aa);
+    trim_slash(bb);
+    for (p = (unsigned char *)aa; *p; p++) {
+        if (*p >= 'A' && *p <= 'Z') {
+            *p = (unsigned char)(*p - 'A' + 'a');
+        }
+    }
+    for (p = (unsigned char *)bb; *p; p++) {
+        if (*p >= 'A' && *p <= 'Z') {
+            *p = (unsigned char)(*p - 'A' + 'a');
+        }
+    }
+    return strcmp(aa, bb) == 0;
+}
+
+static int
+reg_query_long(HKEY key, const char *name, char *out, size_t outsz)
+{
+    DWORD type = 0, n = 0;
+    char *raw;
+
+    if (!out || outsz == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    if (RegQueryValueExA(key, name, NULL, &type, NULL, &n) != ERROR_SUCCESS
+        || n < 1 || (type != REG_SZ && type != REG_EXPAND_SZ)) {
+        return -1;
+    }
+    if (n > 8192) {
+        n = 8192;
+    }
+    raw = (char *)calloc(1, (size_t)n + 1);
+    if (!raw) {
+        return -1;
+    }
+    if (RegQueryValueExA(key, name, NULL, NULL, (LPBYTE)raw, &n) != ERROR_SUCCESS) {
+        free(raw);
+        return -1;
+    }
+    if (type == REG_EXPAND_SZ) {
+        if (ExpandEnvironmentStringsA(raw, out, (DWORD)outsz) == 0) {
+            free(raw);
+            return -1;
+        }
+    } else if ((size_t)snprintf(out, outsz, "%s", raw) >= outsz) {
+        out[outsz - 1] = '\0';
+    }
+    free(raw);
+    return 0;
+}
+
+static int
+split_uninstall_command(const char *cmd, char *exe, size_t exesz, char *params,
+                        size_t paramsz)
+{
+    const char *p, *end, *cut;
+    size_t      n;
+
+    if (!cmd || !exe || exesz == 0 || !params || paramsz == 0) {
+        return -1;
+    }
+    exe[0] = '\0';
+    params[0] = '\0';
+    p = cmd;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (*p == '"') {
+        end = strchr(p + 1, '"');
+        if (!end) {
+            return -1;
+        }
+        n = (size_t)(end - (p + 1));
+        if (n == 0 || n >= exesz) {
+            return -1;
+        }
+        memcpy(exe, p + 1, n);
+        exe[n] = '\0';
+        p = end + 1;
+    } else {
+        cut = strstr(p, " /");
+        if (!cut) {
+            cut = strstr(p, " -");
+        }
+        if (!cut) {
+            if (strlen(p) >= exesz) {
+                return -1;
+            }
+            snprintf(exe, exesz, "%s", p);
+            n = strlen(exe);
+            while (n > 0 && (exe[n - 1] == ' ' || exe[n - 1] == '\t')) {
+                exe[--n] = '\0';
+            }
+            return exe[0] ? 0 : -1;
+        }
+        n = (size_t)(cut - p);
+        if (n == 0 || n >= exesz) {
+            return -1;
+        }
+        memcpy(exe, p, n);
+        exe[n] = '\0';
+        p = cut + 1;
+    }
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (strlen(p) >= paramsz) {
+        return -1;
+    }
+    snprintf(params, paramsz, "%s", p);
+    return 0;
+}
+
+static int
+uninstall_command_usable(const char *cmd, char *exe, size_t exesz, char *params,
+                         size_t paramsz)
+{
+    if (!cmd || !cmd[0]) {
+        return 0;
+    }
+    if (contains_ci(cmd, "steam.exe") || contains_ci(cmd, "steam://")) {
+        return 0;
+    }
+    if (split_uninstall_command(cmd, exe, exesz, params, paramsz) != 0) {
+        return 0;
+    }
+    if ((strchr(exe, '\\') || strchr(exe, '/')) && !file_exists_non_dir(exe)) {
+        return 0;
+    }
+    return 1;
+}
+
+typedef struct {
+    int  score;
+    char exe[VAPOR_WIN_PATH];
+    char params[2048];
+    char dir[VAPOR_WIN_PATH];
+} uninst_hit;
+
+static void
+consider_uninstall_key(HKEY product, const char *name, const char *id,
+                       const char *install_dir, uninst_hit *best)
+{
+    char display[512];
+    char loc[VAPOR_WIN_PATH];
+    char quiet[2048];
+    char plain[2048];
+    char exe[VAPOR_WIN_PATH];
+    char params[2048];
+    int  score;
+
+    display[0] = loc[0] = quiet[0] = plain[0] = exe[0] = params[0] = '\0';
+    (void)reg_query_long(product, "DisplayName", display, sizeof(display));
+    (void)reg_query_long(product, "InstallLocation", loc, sizeof(loc));
+    if (!loc[0]) {
+        char  icon[VAPOR_WIN_PATH];
+        char *comma;
+        char *slash;
+
+        if (reg_query_long(product, "DisplayIcon", icon, sizeof(icon)) == 0) {
+            comma = strrchr(icon, ',');
+            if (comma) {
+                *comma = '\0';
+            }
+            snprintf(loc, sizeof(loc), "%s", icon);
+            slash = strrchr(loc, '\\');
+            if (!slash) {
+                slash = strrchr(loc, '/');
+            }
+            if (slash) {
+                *slash = '\0';
+            } else {
+                loc[0] = '\0';
+            }
+        }
+    }
+    trim_slash(loc);
+    if (!name_matches_product(display, name, id)) {
+        return;
+    }
+    score = 4;
+    if (install_dir && loc[0] && paths_equal_ci(loc, install_dir)) {
+        score += 8;
+    }
+    (void)reg_query_long(product, "QuietUninstallString", quiet, sizeof(quiet));
+    (void)reg_query_long(product, "UninstallString", plain, sizeof(plain));
+    if (!uninstall_command_usable(quiet, exe, sizeof(exe), params, sizeof(params))
+        && !uninstall_command_usable(plain, exe, sizeof(exe), params,
+                                    sizeof(params))) {
+        return;
+    }
+    if (score < best->score) {
+        return;
+    }
+    if (score == best->score && best->exe[0]) {
+        return;
+    }
+    best->score = score;
+    snprintf(best->exe, sizeof(best->exe), "%s", exe);
+    snprintf(best->params, sizeof(best->params), "%s", params);
+    snprintf(best->dir, sizeof(best->dir), "%s", loc);
+}
+
+static void
+scan_uninstall_commands(HKEY hive, const char *sub, const char *name,
+                        const char *id, const char *install_dir, uninst_hit *best)
+{
+    HKEY  k;
+    DWORD i;
+
+    if (RegOpenKeyExA(hive, sub, 0, KEY_READ, &k) != ERROR_SUCCESS) {
+        return;
+    }
+    for (i = 0;; i++) {
+        char  child[256];
+        char  path[512];
+        DWORD childn = sizeof(child);
+        HKEY  product;
+
+        if (RegEnumKeyExA(k, i, child, &childn, NULL, NULL, NULL, NULL)
+            != ERROR_SUCCESS) {
+            break;
+        }
+        if (snprintf(path, sizeof(path), "%s\\%s", sub, child) >= (int)sizeof(path)
+            || RegOpenKeyExA(hive, path, 0, KEY_READ, &product) != ERROR_SUCCESS) {
+            continue;
+        }
+        consider_uninstall_key(product, name, id, install_dir, best);
+        RegCloseKey(product);
+    }
+    RegCloseKey(k);
+}
+
+int
+vapor_plat_find_uninstall(const char *name, const char *id,
+                          const char *install_dir, char *out_exe, size_t exesz,
+                          char *out_params, size_t paramsz, char *out_dir,
+                          size_t dirsz)
+{
+    uninst_hit best;
+
+    if (!out_exe || exesz == 0) {
+        return 1;
+    }
+    out_exe[0] = '\0';
+    if (out_params && paramsz) {
+        out_params[0] = '\0';
+    }
+    if (out_dir && dirsz) {
+        out_dir[0] = '\0';
+    }
+    memset(&best, 0, sizeof(best));
+    best.score = -1;
+    scan_uninstall_commands(HKEY_LOCAL_MACHINE,
+                            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+                            name, id, install_dir, &best);
+    scan_uninstall_commands(HKEY_LOCAL_MACHINE,
+                            "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\"
+                            "CurrentVersion\\Uninstall",
+                            name, id, install_dir, &best);
+    scan_uninstall_commands(HKEY_CURRENT_USER,
+                            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+                            name, id, install_dir, &best);
+    if (best.score < 0 || !best.exe[0]) {
+        return 1;
+    }
+    if ((size_t)snprintf(out_exe, exesz, "%s", best.exe) >= exesz) {
+        out_exe[0] = '\0';
+        return 1;
+    }
+    if (out_params && paramsz
+        && (size_t)snprintf(out_params, paramsz, "%s", best.params) >= paramsz) {
+        out_exe[0] = '\0';
+        return 1;
+    }
+    if (out_dir && dirsz && best.dir[0]) {
+        snprintf(out_dir, dirsz, "%s", best.dir);
+    }
+    return 0;
+}
+
+static unsigned
+pe_u16(const unsigned char *p)
+{
+    return (unsigned)p[0] | ((unsigned)p[1] << 8);
+}
+
+static unsigned
+pe_u32(const unsigned char *p)
+{
+    return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16)
+           | ((unsigned)p[3] << 24);
+}
+
+static int
+read_at(FILE *f, long off, void *buf, size_t n)
+{
+    if (off < 0) {
+        return -1;
+    }
+    if (fseek(f, off, SEEK_SET) != 0) {
+        return -1;
+    }
+    return fread(buf, 1, n, f) == n ? 0 : -1;
+}
+
+typedef struct {
+    unsigned va;
+    unsigned vsize;
+    unsigned raw;
+    unsigned rawsz;
+} pe_section;
+
+static long
+rva_to_off(const pe_section *secs, int nsec, unsigned rva)
+{
+    int i;
+
+    for (i = 0; i < nsec; i++) {
+        unsigned span = secs[i].vsize > secs[i].rawsz ? secs[i].vsize
+                                                      : secs[i].rawsz;
+
+        if (span == 0 || rva < secs[i].va || rva >= secs[i].va + span) {
+            continue;
+        }
+        if (rva - secs[i].va >= secs[i].rawsz) {
+            return -1;
+        }
+        return (long)(secs[i].raw + (rva - secs[i].va));
+    }
+    return -1;
+}
+
+static int
+dll_resolved(const char *exe_dir, const char *dll)
+{
+    char  path[VAPOR_WIN_PATH];
+    char  dir[MAX_PATH];
+    UINT  n;
+    const char *base = dll;
+    const char *slash = strrchr(dll, '\\');
+    const char *fslash = strrchr(dll, '/');
+
+    if (fslash > slash) {
+        slash = fslash;
+    }
+    if (slash && slash[1]) {
+        base = slash + 1;
+    }
+    if (has_prefix_ci(base, "api-ms-") || has_prefix_ci(base, "ext-ms-")) {
+        return 1;
+    }
+    if (snprintf(path, sizeof(path), "%s\\%s", exe_dir, base) < (int)sizeof(path)
+        && file_exists_non_dir(path)) {
+        return 1;
+    }
+    n = GetSystemDirectoryA(dir, MAX_PATH);
+    if (n > 0 && n < MAX_PATH
+        && snprintf(path, sizeof(path), "%s\\%s", dir, base) < (int)sizeof(path)
+        && file_exists_non_dir(path)) {
+        return 1;
+    }
+    n = GetWindowsDirectoryA(dir, MAX_PATH);
+    if (n > 0 && n < MAX_PATH
+        && snprintf(path, sizeof(path), "%s\\%s", dir, base) < (int)sizeof(path)
+        && file_exists_non_dir(path)) {
+        return 1;
+    }
+    n = GetSystemWow64DirectoryA(dir, MAX_PATH);
+    if (n > 0 && n < MAX_PATH
+        && snprintf(path, sizeof(path), "%s\\%s", dir, base) < (int)sizeof(path)
+        && file_exists_non_dir(path)) {
+        return 1;
+    }
+    return 0;
+}
+
+static void
+append_missing_dll(char *out, size_t outsz, int *count, const char *name)
+{
+    size_t used = out ? strlen(out) : 0;
+    size_t nlen = strlen(name);
+
+    if (!out || outsz == 0 || *count >= 12) {
+        return;
+    }
+    if (used > 0) {
+        if (used + 2 >= outsz) {
+            return;
+        }
+        out[used++] = ',';
+        out[used++] = ' ';
+        out[used] = '\0';
+    }
+    if (used + nlen >= outsz) {
+        return;
+    }
+    memcpy(out + used, name, nlen + 1);
+    (*count)++;
+}
+
+int
+vapor_plat_missing_dlls(const char *exe, char *out, size_t outsz)
+{
+    FILE         *f;
+    unsigned char dos[64];
+    unsigned char pe[24];
+    unsigned char opt[256];
+    unsigned char secbuf[40];
+    unsigned char desc[20];
+    unsigned char namebuf[64];
+    pe_section    secs[96];
+    char          exe_dir[VAPOR_WIN_PATH];
+    const char   *slash;
+    long          lfanew, name_off, desc_off;
+    unsigned      opt_size, magic, nsec, import_rva, i;
+    int           nmissing = 0;
+    size_t        dir_n;
+
+    if (out && outsz) {
+        out[0] = '\0';
+    }
+    if (!exe || !exe[0]) {
+        return -1;
+    }
+    f = fopen(exe, "rb");
+    if (!f) {
+        return -1;
+    }
+    if (read_at(f, 0, dos, sizeof(dos)) != 0 || dos[0] != 'M' || dos[1] != 'Z') {
+        fclose(f);
+        return -1;
+    }
+    lfanew = (long)pe_u32(dos + 60);
+    if (read_at(f, lfanew, pe, sizeof(pe)) != 0 || pe[0] != 'P' || pe[1] != 'E'
+        || pe[2] != 0 || pe[3] != 0) {
+        fclose(f);
+        return -1;
+    }
+    nsec = pe_u16(pe + 4 + 2);
+    opt_size = pe_u16(pe + 4 + 16);
+    if (nsec == 0 || nsec > 96 || opt_size < 96 || opt_size > sizeof(opt)) {
+        fclose(f);
+        return -1;
+    }
+    if (read_at(f, lfanew + 24, opt, opt_size) != 0) {
+        fclose(f);
+        return -1;
+    }
+    magic = pe_u16(opt);
+    if (magic == 0x10b) {
+        if (opt_size < 104) {
+            fclose(f);
+            return -1;
+        }
+        import_rva = pe_u32(opt + 96 + 8);
+    } else if (magic == 0x20b) {
+        if (opt_size < 120) {
+            fclose(f);
+            return -1;
+        }
+        import_rva = pe_u32(opt + 112 + 8);
+    } else {
+        fclose(f);
+        return -1;
+    }
+    if (import_rva == 0) {
+        fclose(f);
+        return 0;
+    }
+    for (i = 0; i < nsec; i++) {
+        if (read_at(f, lfanew + 24 + (long)opt_size + (long)i * 40, secbuf, 40)
+            != 0) {
+            fclose(f);
+            return -1;
+        }
+        secs[i].vsize = pe_u32(secbuf + 8);
+        secs[i].va = pe_u32(secbuf + 12);
+        secs[i].rawsz = pe_u32(secbuf + 16);
+        secs[i].raw = pe_u32(secbuf + 20);
+    }
+    slash = strrchr(exe, '\\');
+    if (!slash) {
+        slash = strrchr(exe, '/');
+    }
+    if (!slash || slash == exe) {
+        snprintf(exe_dir, sizeof(exe_dir), ".");
+    } else {
+        dir_n = (size_t)(slash - exe);
+        if (dir_n >= sizeof(exe_dir)) {
+            fclose(f);
+            return -1;
+        }
+        memcpy(exe_dir, exe, dir_n);
+        exe_dir[dir_n] = '\0';
+    }
+
+    for (i = 0; i < 256; i++) {
+        desc_off = rva_to_off(secs, (int)nsec, import_rva + i * 20);
+        if (desc_off < 0 || read_at(f, desc_off, desc, sizeof(desc)) != 0) {
+            fclose(f);
+            return nmissing > 0 ? 1 : -1;
+        }
+        if (pe_u32(desc + 12) == 0) {
+            break;
+        }
+        name_off = rva_to_off(secs, (int)nsec, pe_u32(desc + 12));
+        if (name_off < 0 || read_at(f, name_off, namebuf, sizeof(namebuf)) != 0) {
+            continue;
+        }
+        namebuf[sizeof(namebuf) - 1] = '\0';
+        if (namebuf[0] == '\0') {
+            continue;
+        }
+        if (!dll_resolved(exe_dir, (const char *)namebuf)) {
+            append_missing_dll(out, outsz, &nmissing, (const char *)namebuf);
+        }
+    }
+    fclose(f);
+    return nmissing > 0 ? 1 : 0;
+}
+
 #endif /* _WIN32 */

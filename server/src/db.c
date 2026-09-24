@@ -262,7 +262,8 @@ vapord_game_titles(sqlite3 *db, char *names, size_t namesz, size_t cap,
         return -1;
     }
     if (sqlite3_prepare_v2(db,
-                           "SELECT name FROM games ORDER BY name COLLATE NOCASE",
+                           "SELECT id || '  ' || name FROM games"
+                           " ORDER BY name COLLATE NOCASE",
                            -1, &st, NULL)
         != SQLITE_OK) {
         return -1;

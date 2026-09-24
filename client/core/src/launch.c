@@ -107,6 +107,97 @@ file_in_dir(const char *dir, const char *name, char *out, size_t outsz)
     return vapor_plat_exists(out) && !vapor_plat_is_dir(out);
 }
 
+static int
+dll_list_has(const char *list, const char *dll)
+{
+    size_t n, i, len;
+
+    if (!list || !dll || !dll[0]) {
+        return 0;
+    }
+    n = strlen(dll);
+    while (*list) {
+        const char *start;
+        const char *end;
+
+        while (*list == ' ' || *list == ',') {
+            list++;
+        }
+        if (!*list) {
+            break;
+        }
+        start = list;
+        while (*list && *list != ',') {
+            list++;
+        }
+        end = list;
+        while (end > start && end[-1] == ' ') {
+            end--;
+        }
+        len = (size_t)(end - start);
+        if (len == n) {
+            for (i = 0; i < n; i++) {
+                unsigned char a = (unsigned char)start[i];
+                unsigned char b = (unsigned char)dll[i];
+
+                if (a >= 'A' && a <= 'Z') {
+                    a = (unsigned char)(a - 'A' + 'a');
+                }
+                if (b >= 'A' && b <= 'Z') {
+                    b = (unsigned char)(b - 'A' + 'a');
+                }
+                if (a != b) {
+                    break;
+                }
+            }
+            if (i == n) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* The Windows loader dialog ("binkw32.dll was not found") is too late: Play
+ * reports the missing names itself. Companion DLLs have to be the ones that
+ * shipped with the game. steam_api.dll is not synthesized. */
+static int
+refuse_missing_dlls(vapor_client *vc, const char *exec_path)
+{
+    char        missing[640];
+    const char *base;
+    const char *slash;
+    int         rc;
+
+    rc = vapor_plat_missing_dlls(exec_path, missing, sizeof(missing));
+    if (rc <= 0) {
+        return 0;
+    }
+    slash = strrchr(exec_path, '\\');
+    if (!slash) {
+        slash = strrchr(exec_path, '/');
+    }
+    base = slash ? slash + 1 : exec_path;
+    if (dll_list_has(missing, "steam_api.dll")
+        || dll_list_has(missing, "steam_api64.dll")) {
+        vapor_client_set_error(vc,
+                               "cannot start %s; missing %s. steam_api.dll is "
+                               "the Steamworks library and Vapor does not "
+                               "emulate it. Any other name in that list is a "
+                               "file from the game's own install (Bink video, "
+                               "the Sixense Hydra library, and similar) and "
+                               "has to sit next to the executable",
+                               base, missing);
+    } else {
+        vapor_client_set_error(vc,
+                               "cannot start %s; missing %s. Those files ship "
+                               "with the game and have to sit next to the "
+                               "executable",
+                               base, missing);
+    }
+    return -1;
+}
+
 static void
 parent_dir(const char *path, char *out, size_t outsz)
 {
@@ -545,6 +636,11 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
         snprintf(cwd_path, sizeof(cwd_path), "%s", install_dir);
     }
     vapor_plat_native_path(cwd_path);
+
+    if (!use_dhewm3 && refuse_missing_dlls(vc, exec_path) != 0) {
+        vapor_manifest_free(&m);
+        return -1;
+    }
 
     argv_n = use_dhewm3 ? 3 : t->nargs;
     argv = (char **)calloc(argv_n + 2, sizeof(*argv));

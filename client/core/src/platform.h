@@ -64,6 +64,21 @@ int vapor_plat_guess_product_dir(const char *name, const char *id, char *out,
 /* Resolve `name` on PATH. 0 if `out` is filled. */
 int vapor_plat_search_path(const char *name, char *out, size_t outsz);
 
+/* Windows uninstall entry for a product whose display name matches `name`
+ * or `id`. Prefers QuietUninstallString. 0 if `out_exe` was filled.
+ * `out_dir` receives InstallLocation when the key has one. Steam
+ * (steam.exe / steam://) entries are ignored. */
+int vapor_plat_find_uninstall(const char *name, const char *id,
+                              const char *install_dir, char *out_exe,
+                              size_t exesz, char *out_params, size_t paramsz,
+                              char *out_dir, size_t dirsz);
+
+/* Implicit DLL imports of a Windows executable that the loader would not
+ * find beside the exe or in a system directory. 0 if nothing is missing,
+ * 1 if `out` lists the missing names, -1 if `exe` is not a readable PE
+ * (the caller should launch anyway). */
+int vapor_plat_missing_dlls(const char *exe, char *out, size_t outsz);
+
 /* Path separator normalisation: the manifest always uses '/', Windows APIs
  * mostly accept it, but launching wants native separators. */
 void vapor_plat_native_path(char *path);

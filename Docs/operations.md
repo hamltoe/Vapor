@@ -171,6 +171,17 @@ dialog those exes show on Windows 10+) and looks for a patched exe or
 a Doom 3 source port (`dhewm3`) instead. On Windows, first Play of a
 retail Doom 3 tree downloads the official dhewm3 build into
 `%LOCALAPPDATA%\Vapor\runtimes\dhewm3` when it is not already present.
+Before a Windows executable is spawned, Play reads its import table and
+reports companion DLLs that are not next to it (`binkw32.dll`,
+`libfreespace.dll`, and similar). Those files have to be the copies that
+shipped with the game. `steam_api.dll` is not emulated.
+
+Uninstall runs the Windows uninstall entry for that product when one
+matches the game (QuietUninstallString, otherwise UninstallString,
+otherwise `unins000.exe` / `uninstall.exe` in the install folder), then
+deletes the recorded folders, including a Program Files tree the
+installer created. Cancelling the uninstaller leaves the install in
+place.
 The GUI status during Install is download → extract → Windows
 installer; a full progress bar after the zip lands is extract/setup,
 not Verify.
@@ -180,8 +191,12 @@ description, and the public review score when those fields are empty.
 
 Drop a new folder in and wait up to an hour (`discover_interval`, default
 3600 seconds), hit **Discover now** in the host window, or run
-`vapor-admin -L PATH discover`. Removing a folder drops that game from
-the catalog; bytes on disk in `content_root` are left alone.
+`vapor-admin -L PATH discover`. The host window also has a command
+line: `discover`, `list`, and `remove ID` (the id is the first column
+in the games list). Removing a folder from `library_root` and running
+discover drops that game from the catalog. `remove ID` unregisters it
+immediately, but the folder has to leave the library or the next scan
+publishes it again. Bytes on disk in `content_root` are left alone.
 
 `vapor-admin add` still works for a fully specified ingest. An
 admin-published id is not overwritten by discovery.

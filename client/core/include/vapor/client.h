@@ -204,6 +204,9 @@ typedef struct {
 int vapor_install_game(vapor_client *vc, const char *game_id,
                        const char *version, const vapor_install_opts *opts,
                        vapor_progress_fn cb, void *ud);
+/* Removes a game the way it was installed. A Windows product match runs
+ * that entry's uninstaller (or unins000.exe / uninstall.exe in the install
+ * folder) before the recorded folders are deleted. */
 int vapor_uninstall_game(vapor_client *vc, const char *game_id);
 
 /* Run a Windows installer that was downloaded into the payload directory,
