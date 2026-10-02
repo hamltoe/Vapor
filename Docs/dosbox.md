@@ -1,8 +1,11 @@
 # MS-DOS games via DOSBox
 
-Future work. Vapor already installs folder/zip dumps and has a reserved
-`targets[].runtime` field that launch currently rejects. DOS support is
-mostly **detect the game** and **wrap DOSBox** — not a new package format.
+Windows Play wraps DOSBox Staging when a target's `runtime` is
+`dosbox`. That comes from `vapor.json` (`runtime`, `dos_exec`) or from
+discovery noticing an MZ executable with no PE header, or a `.COM` that
+is not `setup.com` / `install.com`. Linux launch and CD `imgmount` are
+still later. The per-game file is the same sidecar as install mode and
+account saves; see [manifest.md](manifest.md).
 
 64-bit Windows cannot run 16-bit DOS `.EXE`/`.COM` natively, so an
 emulator is required, not optional.
@@ -41,13 +44,20 @@ Linux later is a second target with `"platform": "linux"` and the same
 ## v1 scope
 
 **In:** unzipped DOS folders and zips (the common GOG/archive dump).
-Auto-discover when possible; override with `vapor.json` / `vapor-admin`.
-Play from the existing Install / Play buttons.
+Auto-discover when possible; override with `vapor.json`. Play from the
+existing Install / Play buttons on Windows. The client looks up
+`dosbox_path`, then `PATH`, then common Staging install folders.
+`vapor config dosbox PATH` sets the binary. A generated
+`<install>/.vapor/dosbox.conf` mounts the install directory and runs
+the DOS executable.
 
-**Out for v1:** bundling DOSBox, Linux launch, CD/floppy `imgmount`,
-Windows 3.1/9x (that is DOSBox-X), and a per-game settings UI.
+**Out for v1:** bundling DOSBox, Linux launch, CD/floppy `imgmount`
+(`install_mode: "keep_disc"` leaves the images and Play says CD mount
+is not available yet), Windows 3.1/9x (that is DOSBox-X), and a
+per-game settings UI. Save paths are the manifest `saves` list, not a
+separate DOSBox capture directory.
 
-## What to build
+## How Windows launch works
 
 ```
 Discover or vapor-admin
@@ -67,9 +77,9 @@ DOSBox Staging ──► GAME.EXE
 
 ### 1. Tell DOS games from Windows games
 
-Add a small MZ/PE check (shared, e.g. in common): `MZ` header and **no**
-`PE\0\0` at the `e_lfanew` offset → DOS. `.COM` is always DOS. `.BAT`
-only if the sidecar/admin names it (too many `INSTALL.BAT`s).
+A shared MZ/PE check in common treats an `MZ` header with **no**
+`PE\0\0` at `e_lfanew` as DOS. `.COM` is always DOS. `.BAT` is DOS only
+when `vapor.json` names it (too many `INSTALL.BAT`s).
 
 Reuse the existing junk heuristics (`setup.exe`, `upd.exe`, `*up.exe`,
 `*update.exe`, …) and extend them with `install.com` / `setup.com`.
@@ -83,16 +93,18 @@ and Play will fail on 64-bit.
   walk in [`client/core/src/install.c`](../client/core/src/install.c): if
   the best candidate is DOS, emit a windows target with
   `runtime: "dosbox"` instead of a native `.exe`.
-- Sidecar `vapor.json` (see [manifest.md](manifest.md)): add `dos_exec`.
-- [`vapor-admin add`](../server/tools/vapor_admin.c): add `--dos-exec`.
+- Sidecar `vapor.json` (see [manifest.md](manifest.md)): `runtime` and
+  `dos_exec`. An explicit `runtime` other than `native` is stored as-is.
+- `vapor-admin add` still has no `--dos-exec`. Put `dos_exec` in
+  `vapor.json` instead.
 
 The zip / SHA-256 / catalog API stay as they are.
 
 ### 3. Launch on Windows
 
-Replace the hard reject in
-[`client/core/src/launch.c`](../client/core/src/launch.c) (the
-`"does not support yet"` branch) for `runtime == "dosbox"`:
+[`client/core/src/launch.c`](../client/core/src/launch.c) launches
+`runtime == "dosbox"` on Windows. Any other runtime name is still
+rejected with that name in the error.
 
 1. Resolve the DOSBox binary (`dosbox_path`, `PATH`, well-known folders).
 2. Write `<install>/.vapor/dosbox.conf` with a generated `[autoexec]`:
@@ -111,18 +123,14 @@ exit
 A generated conf is more portable across DOSBox / Staging / DOSBox-X
 than `-c` chains or Staging-only `--working-dir`.
 
-Add `dosbox_path` to `vapor_client_config` in
-[`client/core/include/vapor/client.h`](../client/core/include/vapor/client.h)
-and the key=value config in
-[`client/core/src/config.c`](../client/core/src/config.c). No GUI panel
-required; a clear “DOSBox not found” error is enough.
+`dosbox_path` lives on `vapor_client_config` and in the key=value
+config. There is no GUI panel; Play says to install DOSBox Staging when
+none of the lookups find a binary.
 
-### 4. Docs and a small test
+### 4. Test
 
-- Document `runtime: "dosbox"`, `dos_exec`, and `--dos-exec` in
-  [manifest.md](manifest.md).
-- Selftest the MZ-vs-PE helper and conf generation (no need to spawn
-  DOSBox in CI).
+Selftest covers the MZ-vs-PE helper and save-path rules. It does not
+spawn DOSBox.
 
 ## How you use it
 

@@ -5,6 +5,7 @@ add_library(vapor_common STATIC
     src/manifest.c
     src/iso9660.c
     src/wise.c
+    src/saves.c
 )
 
 target_include_directories(vapor_common PUBLIC include)

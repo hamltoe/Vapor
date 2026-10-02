@@ -3,6 +3,7 @@
 #include "platform.h"
 
 #include <windows.h>
+#include <commdlg.h>
 #include <objbase.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -423,7 +424,7 @@ vapor_plat_run(const char *exec, char *const argv[], const char *cwd,
         rc = 0;
     } else if (GetLastError() == ERROR_ELEVATION_REQUIRED) {
         vapor_buf_free(&cmd);
-        return vapor_plat_run_ui(exec, cwd, NULL, out_exit);
+        return vapor_plat_run_ui(exec, cwd, NULL, out_exit, NULL, NULL);
     }
 
     vapor_buf_free(&cmd);
@@ -747,17 +748,59 @@ new_installer_helpers_running(const vapor_pid_set *before, DWORD launched)
     return 0;
 }
 
+static void
+terminate_pid(DWORD pid)
+{
+    HANDLE h;
+
+    if (pid == 0) {
+        return;
+    }
+    h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+    if (!h) {
+        return;
+    }
+    TerminateProcess(h, 1);
+    CloseHandle(h);
+}
+
+static void
+terminate_new_helpers(const vapor_pid_set *before, DWORD launched)
+{
+    vapor_pid_set now;
+    int           i;
+
+    collect_installer_helpers(&now);
+    for (i = 0; i < now.n; i++) {
+        if (now.pids[i] != launched && !pid_set_has(before, now.pids[i])) {
+            terminate_pid(now.pids[i]);
+        }
+    }
+}
+
+static int
+cancel_requested(vapor_plat_cancel_fn cancel, void *ud)
+{
+    return cancel && cancel(ud) != 0;
+}
+
 /* A bootstrapper often returns as soon as msiexec (or a second setup.exe) is
  * up. Wait until those newcomers exit so we do not scan an unfinished tree.
- * Cap the wait: a stray msiexec (Windows Update) must not block forever. */
-static void
-wait_new_installer_helpers(const vapor_pid_set *before, DWORD launched)
+ * Cap the wait: a stray msiexec (Windows Update) must not block forever.
+ * Returns 1 if `cancel` fired. */
+static int
+wait_new_installer_helpers(const vapor_pid_set *before, DWORD launched,
+                           vapor_plat_cancel_fn cancel, void *ud)
 {
     int ticks;
 
     for (ticks = 0; ticks < 600; ticks++) {
+        if (cancel_requested(cancel, ud)) {
+            terminate_new_helpers(before, launched);
+            return 1;
+        }
         if (!new_installer_helpers_running(before, launched)) {
-            return;
+            return 0;
         }
         if (ticks == 0 || ticks % 15 == 14) {
             printf("  waiting for installer helper processes (%d s)\n",
@@ -768,6 +811,7 @@ wait_new_installer_helpers(const vapor_pid_set *before, DWORD launched)
     }
     printf("  helpers still running; checking the destination anyway\n");
     fflush(stdout);
+    return 0;
 }
 
 static int
@@ -816,7 +860,7 @@ try_sibling_bootstrapper(const char *exec, char *out, size_t outsz)
 
 int
 vapor_plat_run_ui(const char *exec, const char *cwd, const char *extra,
-                  int *out_exit)
+                  int *out_exit, vapor_plat_cancel_fn cancel, void *ud)
 {
     SHELLEXECUTEINFOA sei;
     char              msiexec[MAX_PATH];
@@ -916,7 +960,10 @@ vapor_plat_run_ui(const char *exec, const char *cwd, const char *extra,
     }
     if (!sei.hProcess) {
         if (wait_helpers) {
-            wait_new_installer_helpers(&before, 0);
+            if (wait_new_installer_helpers(&before, 0, cancel, ud) != 0) {
+                rc = 1;
+                goto done;
+            }
         }
         if (out_exit) {
             *out_exit = 0;
@@ -930,23 +977,48 @@ vapor_plat_run_ui(const char *exec, const char *cwd, const char *extra,
            (unsigned long)launched);
     fflush(stdout);
     {
-        DWORD waited = 0;
+        DWORD waited_ms = 0;
+        int   cancelled = 0;
 
         for (;;) {
-            DWORD w = WaitForSingleObject(sei.hProcess, 15000);
+            DWORD w;
 
+            if (cancel_requested(cancel, ud)) {
+                cancelled = 1;
+                break;
+            }
+            w = WaitForSingleObject(sei.hProcess, 500);
             if (w == WAIT_OBJECT_0 || w == WAIT_FAILED) {
                 break;
             }
-            waited += 15;
-            printf("  still waiting for Setup (%u s)\n", waited);
-            fflush(stdout);
+            waited_ms += 500;
+            if (waited_ms % 15000 == 0) {
+                printf("  still waiting for Setup (%u s)\n", waited_ms / 1000);
+                fflush(stdout);
+            }
+        }
+        if (cancelled) {
+            TerminateProcess(sei.hProcess, 1);
+            terminate_new_helpers(&before, launched);
+            GetExitCodeProcess(sei.hProcess, &code);
+            CloseHandle(sei.hProcess);
+            if (out_exit) {
+                *out_exit = (int)code;
+            }
+            rc = 1;
+            goto done;
         }
     }
     GetExitCodeProcess(sei.hProcess, &code);
     CloseHandle(sei.hProcess);
     if (wait_helpers) {
-        wait_new_installer_helpers(&before, launched);
+        if (wait_new_installer_helpers(&before, launched, cancel, ud) != 0) {
+            if (out_exit) {
+                *out_exit = (int)code;
+            }
+            rc = 1;
+            goto done;
+        }
     }
     if (out_exit) {
         *out_exit = (int)code;
@@ -1282,12 +1354,23 @@ consider_uninstall_key(HKEY product, const char *name, const char *id,
         }
     }
     trim_slash(loc);
-    if (!name_matches_product(display, name, id)) {
-        return;
-    }
-    score = 4;
-    if (install_dir && loc[0] && paths_equal_ci(loc, install_dir)) {
-        score += 8;
+    {
+        int path_hit = (install_dir && install_dir[0] && loc[0]
+                        && paths_equal_ci(loc, install_dir));
+        int name_hit = name_matches_product(display, name, id);
+
+        /* Path is the primary key: DisplayName often has a publisher suffix
+         * or GOG tag that will not slug-match the catalog id. */
+        if (!path_hit && !name_hit) {
+            return;
+        }
+        score = 0;
+        if (path_hit) {
+            score += 16;
+        }
+        if (name_hit) {
+            score += 4;
+        }
     }
     (void)reg_query_long(product, "QuietUninstallString", quiet, sizeof(quiet));
     (void)reg_query_long(product, "UninstallString", plain, sizeof(plain));
@@ -1625,6 +1708,105 @@ vapor_plat_missing_dlls(const char *exe, char *out, size_t outsz)
     }
     fclose(f);
     return nmissing > 0 ? 1 : 0;
+}
+
+int
+vapor_plat_absolute(const char *path, char *out, size_t outsz)
+{
+    DWORD n;
+
+    if (!path || !path[0] || !out || outsz == 0) {
+        return -1;
+    }
+    n = GetFullPathNameA(path, (DWORD)outsz, out, NULL);
+    if (n == 0 || n >= (DWORD)outsz) {
+        if (outsz) {
+            out[0] = '\0';
+        }
+        return -1;
+    }
+    return 0;
+}
+
+int
+vapor_plat_pick_file(char *out, size_t outsz)
+{
+    char           file[VAPOR_WIN_PATH];
+    OPENFILENAMEA  ofn;
+
+    if (!out || outsz < 2) {
+        return -1;
+    }
+    file[0] = '\0';
+    memset(&ofn, 0, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = sizeof(file);
+    ofn.lpstrFilter = "Programs\0*.exe;*.bat;*.cmd;*.com\0All files\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.lpstrTitle = "Choose a game to launch";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER
+                | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameA(&ofn)) {
+        out[0] = '\0';
+        return CommDlgExtendedError() == 0 ? 1 : -1;
+    }
+    if ((size_t)snprintf(out, outsz, "%s", file) >= outsz) {
+        out[0] = '\0';
+        return -1;
+    }
+    return 0;
+}
+
+int
+vapor_plat_list_dir(const char *dir, vapor_plat_dir_fn fn, void *ud)
+{
+    char             pattern[VAPOR_WIN_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE           h;
+    int              rc = 0;
+
+    if (!dir || !dir[0] || !fn) {
+        return -1;
+    }
+    if ((size_t)snprintf(pattern, sizeof(pattern), "%s\\*", dir) >= sizeof(pattern)) {
+        return -1;
+    }
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) {
+            continue;
+        }
+        rc = fn(fd.cFileName, ud);
+        if (rc != 0) {
+            break;
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return rc;
+}
+
+int
+vapor_plat_start(const char *exe, const char *params)
+{
+    INT_PTR rc;
+
+    if (!exe || !exe[0]) {
+        return -1;
+    }
+    rc = (INT_PTR)ShellExecuteA(NULL, "open", exe,
+                                (params && params[0]) ? params : NULL, NULL,
+                                SW_SHOWNORMAL);
+    return rc > 32 ? 0 : -1;
+}
+
+int
+vapor_plat_open_url(const char *url)
+{
+    return vapor_plat_start(url, NULL);
 }
 
 #endif /* _WIN32 */

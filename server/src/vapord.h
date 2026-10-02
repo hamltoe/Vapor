@@ -25,6 +25,9 @@ typedef struct {
     /* Drop folder of game directories. Empty means auto-discovery is off. */
     char library_root[VAPORD_PATH_MAX];
     char db_path[VAPORD_PATH_MAX];
+    /* Per-user save archives. Empty until vapord_config_finish fills the
+     * default (a "saves" directory beside the database). */
+    char saves_root[VAPORD_PATH_MAX];
     int  enable_registration;
     int  num_threads;
     /* Seconds between library scans. 0 = only once at startup / on demand. */
@@ -41,6 +44,8 @@ void vapord_config_defaults(vapord_config *c);
 int  vapord_config_load(vapord_config *c, const char *path,
                         char *err, size_t errsz);
 void vapord_config_print(const vapord_config *c);
+/* Fills saves_root from db_path when the config did not set it. */
+void vapord_config_finish(vapord_config *c);
 
 /* Extra log sink for the host window. stderr is still written. */
 void vapord_set_log_sink(void (*fn)(const char *line, void *ud), void *ud);
@@ -121,8 +126,15 @@ int vapord_game_touch_meta(sqlite3 *db, const char *game_id);
 int vapord_version_set_cover(sqlite3 *db, const char *game_id,
                              const char *version, const char *cover);
 
+/* 0 when a row exists, 1 when this user has no save for the game, -1 on error. */
+int vapord_save_get(sqlite3 *db, int64_t user_id, const char *game_id,
+                    int64_t *revision, char *sha, size_t shasz, int64_t *size,
+                    int64_t *updated_at);
+int vapord_save_store(sqlite3 *db, int64_t user_id, const char *game_id,
+                      int64_t revision, const char *sha, int64_t size);
+
 int vapord_rating_set(sqlite3 *db, int64_t user_id, const char *game_id,
-                      int score);
+                     int score);
 int vapord_rating_summary(sqlite3 *db, const char *game_id, int64_t user_id,
                           double *avg, int *votes, int *mine);
 
@@ -152,6 +164,10 @@ int   vapord_send_errorf(struct mg_connection *c, int status, const char *code,
                          const char *fmt, ...);
 int   vapord_send_empty(struct mg_connection *c, int status);
 char *vapord_read_body(struct mg_connection *c, size_t *out_len);
+/* Streams the body to `dest`, refusing anything over `max_bytes`. */
+int vapord_read_body_file(struct mg_connection *c, const char *dest,
+                          uint64_t max_bytes, uint64_t *out_size, char *err,
+                          size_t errsz);
 cJSON *vapord_read_json(struct mg_connection *c, char *err, size_t errsz);
 
 /* Borrowed pointer into the cJSON tree: only valid until the tree is freed. */
@@ -175,7 +191,9 @@ int vapord_route_auth(vapord *app, struct mg_connection *c,
 int vapord_route_catalog(vapord *app, struct mg_connection *c,
                          const char *method, const char *tail);
 int vapord_route_download(vapord *app, struct mg_connection *c,
-                          const char *method, const char *tail);
+                         const char *method, const char *tail);
+int vapord_route_saves(vapord *app, struct mg_connection *c,
+                       const char *method, const char *tail);
 
 /* ----------------------------------------------------------------- content */
 /* Build <content_root>/<game>/<version>[/<file>]. Validates every segment, so
@@ -192,7 +210,12 @@ int vapord_library_path(const vapord_config *cfg, const char *rel,
                         char *out, size_t outsz);
 /* realpath(library_root/rel) and confirm it still sits under library_root. */
 int vapord_library_resolve(const vapord_config *cfg, const char *rel,
-                           char *out, size_t outsz);
+                          char *out, size_t outsz);
+
+/* saves_root/<user_id>/<game_id>[/<leaf>]. `leaf` is a bare filename or NULL. */
+int vapord_saves_path(const vapord_config *cfg, int64_t user_id,
+                      const char *game_id, const char *leaf, char *out,
+                      size_t outsz);
 
 /* Scan library_root, register new or changed game folders, drop vanished ones.
  * Safe to call repeatedly; unchanged folders are skipped after a cheap

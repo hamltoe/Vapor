@@ -20,6 +20,8 @@ typedef struct {
     const char *method;
     const char *url;
     const char *body;           /* request body, or NULL */
+    size_t      body_len;       /* byte length of body; ignored when body is NULL */
+    const char *content_type;   /* defaults to application/json when body is set */
     const char *bearer;         /* token for the Authorization header, or NULL */
     const char *pinned_pubkey;  /* "sha256//..." pin, or NULL */
 

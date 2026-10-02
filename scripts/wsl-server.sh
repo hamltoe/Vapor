@@ -109,6 +109,9 @@ cmd_start() {
             echo "  server URL ..... http://127.0.0.1:${port}"
             echo "  data .......... ${data}"
             echo "  library ....... ${library}"
+            if grep -q 'rdp_allocate_shared_memory: Failed' /mnt/wslg/weston.log 2>/dev/null; then
+                echo "  WSLg .......... copy mode (blank host window). From PowerShell: wsl --shutdown" >&2
+            fi
             return 0
         fi
         sleep 0.1

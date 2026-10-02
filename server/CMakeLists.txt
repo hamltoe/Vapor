@@ -31,6 +31,7 @@ add_executable(vapord
     src/routes_auth.c
     src/routes_catalog.c
     src/routes_download.c
+    src/routes_saves.c
     src/gui.c
 )
 target_link_libraries(vapord PRIVATE

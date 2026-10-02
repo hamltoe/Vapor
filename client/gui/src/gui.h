@@ -118,6 +118,13 @@ typedef struct {
     char  search[64];
     int   search_len;
     int   show_settings;
+    int   show_add_local;
+    char  local_name[256];
+    int   local_name_len;
+    char  local_exe[VAPOR_PATH_MAX];
+    int   local_exe_len;
+    /* Applied to selected_id after the next successful catalog refresh. */
+    char  pending_select[VAPOR_ID_MAX + 1];
     char  selected_id[VAPOR_ID_MAX + 1]; /* details page; empty means the grid */
     int   quit;
 } vapor_app;

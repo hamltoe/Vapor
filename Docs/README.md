@@ -17,7 +17,7 @@ honours.
 | [api.md](api.md) | HTTP API, auth tokens, error bodies |
 | [manifest.md](manifest.md) | Game package schema, ingest, install and launch |
 | [operations.md](operations.md) | Build, run, TLS, systemd, cover art, updates |
-| [dosbox.md](dosbox.md) | Planned MS-DOS ingest and DOSBox Staging launch |
+| [dosbox.md](dosbox.md) | MS-DOS ingest and DOSBox Staging launch |
 
 ## What you get
 

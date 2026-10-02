@@ -53,24 +53,99 @@ u32le(const unsigned char *p)
            | ((uint32_t)p[3] << 24);
 }
 
+/* A raw CD sector is larger than the 2048-byte ISO logical block. `raw` is
+ * the stride on disk; `skip` is where the user data starts inside it. */
+typedef struct {
+    FILE    *f;
+    uint32_t raw;
+    uint32_t skip;
+} iso_image;
+
 static int
-seek_lba(FILE *f, uint32_t lba)
+cd001_at(FILE *f, long long off)
 {
-    return FSEEK64(f, (long long)lba * (long long)ISO_SECTOR, SEEK_SET) == 0
-               ? 0
-               : -1;
+    unsigned char buf[6];
+
+    if (off < 0 || FSEEK64(f, off, SEEK_SET) != 0) {
+        return 0;
+    }
+    if (fread(buf, 1, 6, f) != 6) {
+        return 0;
+    }
+    return memcmp(buf + 1, "CD001", 5) == 0;
 }
 
 static int
-read_sector(FILE *f, uint32_t lba, unsigned char out[ISO_SECTOR])
+try_layout(FILE *f, uint32_t raw, uint32_t skip, uint32_t *out_raw,
+           uint32_t *out_skip)
 {
-    size_t n;
-
-    if (seek_lba(f, lba) != 0) {
+    if (!cd001_at(f, 16ll * (long long)raw + (long long)skip)) {
         return -1;
     }
-    n = fread(out, 1, ISO_SECTOR, f);
-    return n == ISO_SECTOR ? 0 : -1;
+    *out_raw = raw;
+    *out_skip = skip;
+    return 0;
+}
+
+/* Plain ISO first, then BIN/CUE: Mode 1 user data at +16, Mode 2 Form 1 at
+ * +24, 2448-byte sectors (2352 + subchannel), and headerless 2336. */
+static int
+detect_layout(FILE *f, uint32_t *raw, uint32_t *skip)
+{
+    unsigned char lead[16];
+    uint32_t      prefer = 16, alt = 24;
+    size_t        i;
+    static const uint32_t strides[] = { 2352u, 2448u, 2336u };
+
+    if (try_layout(f, ISO_SECTOR, 0, raw, skip) == 0) {
+        return 0;
+    }
+    if (FSEEK64(f, 0, SEEK_SET) == 0 && fread(lead, 1, 16, f) == 16
+        && lead[0] == 0x00 && lead[1] == 0xff && lead[11] == 0x00
+        && lead[15] == 2) {
+        prefer = 24;
+        alt = 16;
+    }
+    for (i = 0; i < sizeof(strides) / sizeof(strides[0]); i++) {
+        if (try_layout(f, strides[i], prefer, raw, skip) == 0
+            || try_layout(f, strides[i], alt, raw, skip) == 0) {
+            return 0;
+        }
+    }
+    if (try_layout(f, 2336u, 8, raw, skip) == 0) {
+        return 0;
+    }
+    return -1;
+}
+
+/* Read `n` logical bytes starting `logical_off` into the extent at `lba`.
+ * Raw images are not contiguous, so this stops at each sector boundary. */
+static int
+read_user(iso_image *img, uint32_t lba, uint32_t logical_off, void *dst,
+          uint32_t n)
+{
+    unsigned char *out = (unsigned char *)dst;
+
+    while (n > 0) {
+        uint32_t  block = logical_off / ISO_SECTOR;
+        uint32_t  into = logical_off % ISO_SECTOR;
+        uint32_t  chunk = ISO_SECTOR - into;
+        long long off;
+
+        if (chunk > n) {
+            chunk = n;
+        }
+        off = (long long)(lba + block) * (long long)img->raw
+              + (long long)img->skip + (long long)into;
+        if (FSEEK64(img->f, off, SEEK_SET) != 0
+            || fread(out, 1, chunk, img->f) != chunk) {
+            return -1;
+        }
+        out += chunk;
+        logical_off += chunk;
+        n -= chunk;
+    }
+    return 0;
 }
 
 static int
@@ -213,19 +288,15 @@ mkdirs_parent(const char *path)
 }
 
 static int
-copy_extent(FILE *in, uint32_t lba, uint32_t size, const char *dest,
+copy_extent(iso_image *img, uint32_t lba, uint32_t size, const char *dest,
             char *err, size_t errsz, iso_progress *prog)
 {
     FILE          *out;
     unsigned char  buf[64 * 1024];
-    uint32_t       left = size;
+    uint32_t       off = 0;
 
     if (mkdirs_parent(dest) != 0) {
         set_err(err, errsz, "cannot create directories for ISO file");
-        return -1;
-    }
-    if (seek_lba(in, lba) != 0) {
-        set_err(err, errsz, "ISO file extent is unreadable");
         return -1;
     }
     out = fopen(dest, "wb");
@@ -233,19 +304,22 @@ copy_extent(FILE *in, uint32_t lba, uint32_t size, const char *dest,
         set_err(err, errsz, "cannot write extracted ISO file");
         return -1;
     }
-    while (left > 0) {
-        size_t chunk = left > sizeof(buf) ? sizeof(buf) : left;
-        size_t n = fread(buf, 1, chunk, in);
-        if (n == 0 || fwrite(buf, 1, n, out) != n) {
+    while (off < size) {
+        uint32_t chunk = size - off;
+        if (chunk > sizeof(buf)) {
+            chunk = (uint32_t)sizeof(buf);
+        }
+        if (read_user(img, lba, off, buf, chunk) != 0
+            || fwrite(buf, 1, chunk, out) != chunk) {
             fclose(out);
             set_err(err, errsz, "failed while copying an ISO file");
             return -1;
         }
-        left -= (uint32_t)n;
+        off += chunk;
         if (prog && prog->cb) {
             uint64_t shown;
 
-            prog->done += (uint64_t)n;
+            prog->done += (uint64_t)chunk;
             shown = prog->done;
             if (prog->total > 0 && shown > prog->total) {
                 shown = prog->total;
@@ -265,7 +339,7 @@ copy_extent(FILE *in, uint32_t lba, uint32_t size, const char *dest,
 }
 
 static int
-walk_dir(FILE *in, uint32_t lba, uint32_t size, const char *dest_root,
+walk_dir(iso_image *img, uint32_t lba, uint32_t size, const char *dest_root,
          const char *rel, int joliet, int depth, char *err, size_t errsz,
          iso_progress *prog)
 {
@@ -286,7 +360,7 @@ walk_dir(FILE *in, uint32_t lba, uint32_t size, const char *dest_root,
         set_err(err, errsz, "out of memory");
         return -1;
     }
-    if (seek_lba(in, lba) != 0 || fread(dir, 1, size, in) != size) {
+    if (read_user(img, lba, 0, dir, size) != 0) {
         set_err(err, errsz, "cannot read ISO directory");
         goto done;
     }
@@ -348,13 +422,13 @@ walk_dir(FILE *in, uint32_t lba, uint32_t size, const char *dest_root,
                 set_err(err, errsz, "cannot create directory from ISO");
                 goto done;
             }
-            if (walk_dir(in, flba, flen, dest_root, child_rel, joliet, depth + 1,
+            if (walk_dir(img, flba, flen, dest_root, child_rel, joliet, depth + 1,
                          err, errsz, prog)
                 != 0) {
                 goto done;
             }
         } else if (flen > 0) {
-            if (copy_extent(in, flba, flen, child_abs, err, errsz, prog) != 0) {
+            if (copy_extent(img, flba, flen, child_abs, err, errsz, prog) != 0) {
                 goto done;
             }
         }
@@ -368,11 +442,30 @@ done:
 }
 
 int
+vapor_iso_is_image(const char *path)
+{
+    FILE    *f;
+    uint32_t raw, skip;
+    int      ok;
+
+    if (!path) {
+        return 0;
+    }
+    f = fopen(path, "rb");
+    if (!f) {
+        return 0;
+    }
+    ok = detect_layout(f, &raw, &skip) == 0;
+    fclose(f);
+    return ok;
+}
+
+int
 vapor_iso_extract_progress(const char *iso_path, const char *dest_dir,
                            char *err, size_t errsz, vapor_iso_progress_fn cb,
                            void *ud)
 {
-    FILE          *f;
+    iso_image      img;
     unsigned char  sec[ISO_SECTOR];
     unsigned char  pvd[ISO_SECTOR];
     unsigned char  svd[ISO_SECTOR];
@@ -387,17 +480,23 @@ vapor_iso_extract_progress(const char *iso_path, const char *dest_dir,
         set_err(err, errsz, "ISO extract arguments are missing");
         return -1;
     }
-    f = fopen(iso_path, "rb");
-    if (!f) {
+    memset(&img, 0, sizeof(img));
+    img.f = fopen(iso_path, "rb");
+    if (!img.f) {
         set_err(err, errsz, "cannot open ISO image");
+        return -1;
+    }
+    if (detect_layout(img.f, &img.raw, &img.skip) != 0) {
+        fclose(img.f);
+        set_err(err, errsz, "not an ISO 9660 disc image");
         return -1;
     }
 
     memset(&prog, 0, sizeof(prog));
     prog.cb = cb;
     prog.ud = ud;
-    if (FSEEK64(f, 0, SEEK_END) == 0) {
-        nbytes = FTELL64(f);
+    if (FSEEK64(img.f, 0, SEEK_END) == 0) {
+        nbytes = FTELL64(img.f);
         if (nbytes > 0) {
             prog.total = (uint64_t)nbytes;
         }
@@ -405,18 +504,17 @@ vapor_iso_extract_progress(const char *iso_path, const char *dest_dir,
     if (prog.total == 0) {
         prog.total = 1;
     }
-    rewind(f);
 
     memset(pvd, 0, sizeof(pvd));
     memset(svd, 0, sizeof(svd));
     for (i = 16; i < 32; i++) {
-        if (read_sector(f, i, sec) != 0) {
-            fclose(f);
+        if (read_user(&img, i, 0, sec, ISO_SECTOR) != 0) {
+            fclose(img.f);
             set_err(err, errsz, "cannot read ISO volume descriptors");
             return -1;
         }
         if (memcmp(sec + 1, "CD001", 5) != 0) {
-            fclose(f);
+            fclose(img.f);
             set_err(err, errsz, "not an ISO 9660 disc image");
             return -1;
         }
@@ -432,7 +530,7 @@ vapor_iso_extract_progress(const char *iso_path, const char *dest_dir,
         }
     }
     if (!have_pvd) {
-        fclose(f);
+        fclose(img.f);
         set_err(err, errsz, "ISO image has no primary volume descriptor");
         return -1;
     }
@@ -440,27 +538,27 @@ vapor_iso_extract_progress(const char *iso_path, const char *dest_dir,
     root = have_joliet ? svd : pvd;
     block = u16le(root + 128);
     if (block != ISO_SECTOR) {
-        fclose(f);
+        fclose(img.f);
         set_err(err, errsz, "ISO logical block size is not 2048");
         return -1;
     }
     root_lba = u32le(root + 156 + 2);
     root_len = u32le(root + 156 + 10);
     if (mkdirs(dest_dir) != 0) {
-        fclose(f);
+        fclose(img.f);
         set_err(err, errsz, "cannot create ISO extract directory");
         return -1;
     }
-    if (walk_dir(f, root_lba, root_len, dest_dir, "", have_joliet, 0, err, errsz,
-                 cb ? &prog : NULL)
+    if (walk_dir(&img, root_lba, root_len, dest_dir, "", have_joliet, 0, err,
+                 errsz, cb ? &prog : NULL)
         != 0) {
-        fclose(f);
+        fclose(img.f);
         return -1;
     }
     if (cb) {
         (void)cb(ud, prog.total, prog.total);
     }
-    fclose(f);
+    fclose(img.f);
     return 0;
 }
 

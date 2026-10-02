@@ -123,6 +123,8 @@ vapord_config_load(vapord_config *c, const char *path, char *err, size_t errsz)
             }
         } else if (strcmp(key, "db_path") == 0) {
             snprintf(c->db_path, sizeof(c->db_path), "%s", val);
+        } else if (strcmp(key, "saves_root") == 0) {
+            snprintf(c->saves_root, sizeof(c->saves_root), "%s", val);
         } else if (strcmp(key, "enable_registration") == 0) {
             if (parse_bool(val, &c->enable_registration) != 0) {
                 snprintf(err, errsz, "%s:%d: enable_registration wants a boolean",
@@ -156,8 +158,34 @@ vapord_config_load(vapord_config *c, const char *path, char *err, size_t errsz)
         while (n > 1 && (c->library_root[n - 1] == '/' || c->library_root[n - 1] == '\\')) {
             c->library_root[--n] = '\0';
         }
+        n = strlen(c->saves_root);
+        while (n > 1 && (c->saves_root[n - 1] == '/' || c->saves_root[n - 1] == '\\')) {
+            c->saves_root[--n] = '\0';
+        }
     }
     return 0;
+}
+
+void
+vapord_config_finish(vapord_config *c)
+{
+    char  dir[VAPORD_PATH_MAX];
+    char *slash;
+
+    if (c->saves_root[0]) {
+        return;
+    }
+    snprintf(dir, sizeof(dir), "%s", c->db_path);
+    slash = strrchr(dir, '/');
+    if (!slash) {
+        slash = strrchr(dir, '\\');
+    }
+    if (slash && slash != dir) {
+        *slash = '\0';
+    } else {
+        snprintf(dir, sizeof(dir), "/var/lib/vapor");
+    }
+    snprintf(c->saves_root, sizeof(c->saves_root), "%s/saves", dir);
 }
 
 void
@@ -176,6 +204,7 @@ vapord_config_print(const vapord_config *c)
         printf("  library_root ..... (disabled)\n");
     }
     printf("  db_path .......... %s\n", c->db_path);
+    printf("  saves_root ....... %s\n", c->saves_root);
     printf("  registration ..... %s\n", c->enable_registration ? "open" : "closed");
     printf("  threads .......... %d\n", c->num_threads);
 }

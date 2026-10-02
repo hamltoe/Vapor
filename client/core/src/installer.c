@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "platform.h"
+#include "vapor/iso9660.h"
 #include "vapor/util.h"
 
 static const char *
@@ -183,7 +184,8 @@ vapor_inst_detect(const char *exec, const char *cwd)
     }
     base = basename_of(exec);
     if (vapor_str_ends_with_ci(base, ".iso")
-        || vapor_str_ends_with_ci(base, ".img")) {
+        || vapor_str_ends_with_ci(base, ".img")
+        || (vapor_str_ends_with_ci(base, ".bin") && vapor_iso_is_image(exec))) {
         return VAPOR_INST_ISO;
     }
     if (vapor_str_ends_with_ci(base, ".msi")) {
@@ -256,6 +258,59 @@ vapor_inst_silent_params(vapor_inst_kind kind, const char *exec, const char *des
         /* Disc InstallShield + MSI does not actually run unattended: /s /sms
          * /v"/qn ..." leaves setup.exe waiting on msiexec with no window.
          * Show the wizard and track the folder it creates. */
+        return 1;
+    default:
+        return 1;
+    }
+}
+
+static int
+looks_like_uninstaller(const char *exec)
+{
+    const char *base = basename_of(exec ? exec : "");
+
+    return vapor_str_has_prefix(base, "unins")
+        || vapor_str_eq_ci(base, "uninstall.exe")
+        || vapor_str_eq_ci(base, "uninstaller.exe");
+}
+
+int
+vapor_inst_uninstall_params(vapor_inst_kind kind, const char *exec, char *out,
+                            size_t outsz)
+{
+    if (!out || outsz == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    switch (kind) {
+    case VAPOR_INST_MSI:
+        if (!exec || !*exec) {
+            return 1;
+        }
+        if (snprintf(out, outsz, "/x \"%s\" /qn /norestart", exec) >= (int)outsz) {
+            return -1;
+        }
+        return 0;
+    case VAPOR_INST_INNO:
+        /* setup.exe with quiet flags reinstalls. Only the uninstaller
+         * (unins000.exe) accepts these as a removal. */
+        if (!looks_like_uninstaller(exec)) {
+            return 1;
+        }
+        if (snprintf(out, outsz, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART")
+            >= (int)outsz) {
+            return -1;
+        }
+        return 0;
+    case VAPOR_INST_NSIS:
+        if (!looks_like_uninstaller(exec)) {
+            return 1;
+        }
+        if (snprintf(out, outsz, "/S") >= (int)outsz) {
+            return -1;
+        }
+        return 0;
+    case VAPOR_INST_ISHIELD:
         return 1;
     default:
         return 1;

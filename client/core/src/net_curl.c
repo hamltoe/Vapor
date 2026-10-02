@@ -148,7 +148,10 @@ vapor_net_perform(const vapor_net_req *req, vapor_net_res *res)
                                 req->dest_path ? "Accept: */*"
                                                : "Accept: application/json");
     if (req->body) {
-        headers = curl_slist_append(headers, "Content-Type: application/json");
+        char ctype[160];
+        snprintf(ctype, sizeof(ctype), "Content-Type: %s",
+                 req->content_type ? req->content_type : "application/json");
+        headers = curl_slist_append(headers, ctype);
     }
     if (req->bearer) {
         snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s",
@@ -184,13 +187,12 @@ vapor_net_perform(const vapor_net_req *req, vapor_net_res *res)
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req->body ? req->body : "");
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,
-                         (long)(req->body ? strlen(req->body) : 0));
+                         (long)(req->body ? req->body_len : 0));
     } else if (strcmp(req->method, "GET") != 0) {
         curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, req->method);
         if (req->body) {
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req->body);
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,
-                             (long)strlen(req->body));
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)req->body_len);
         }
     }
 

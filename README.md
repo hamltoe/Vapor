@@ -154,14 +154,15 @@ the player PC after download. The original images stay in the folder:
 ```
 run/library/
   My Game/
-    MyGame.zip          # or Game.iso, or Game.exe plus data/
+    MyGame.zip          # or Game.iso / Game.bin, or Game.exe plus data/
     cover.png           # optional
 ```
 
 The folder name is the catalog title (`My Game` → id `my-game`). vapord
 scans at startup and every hour. The host window has **Discover now**;
 `vapor-admin discover` also scans once immediately. Optional `vapor.json` in the folder overrides id, version,
-and launch paths; see [Docs/manifest.md](Docs/manifest.md).
+launch paths, and `setup_exec` / `uninstall_exec`; see
+[Docs/manifest.md](Docs/manifest.md).
 
 `vapor-admin add` still packages a folder by hand when you want full
 control of id, version, and exec paths:
@@ -265,13 +266,20 @@ stays up.
 .\build-windows\bin\vapor-gui.exe
 ```
 
-Sign in, wait for the catalog, then **Install** / **Play**. Install
-downloads the kit and, on Windows, runs the leftover installer. Inno,
-NSIS, and MSI wrappers install unattended into a tracked folder.
-InstallShield disc kits (Doom 3 and similar) open the Setup wizard
-instead — quiet MSI mode hangs with no window. Play is offered only
-after that destination has a game binary plus data. **Setup** retries
-if the wizard did not finish. Retail SafeDisc executables are not
+Sign in, wait for the catalog, then **Install** / **Play**. **Add game**
+points at a program already installed on this Windows or Linux PC (another
+store, a manual copy). Play launches it. **Remove from library** only
+forgets that shortcut; it does not uninstall or delete those files. Install
+downloads the kit and, on Windows, runs the leftover installer. A
+leftover disc image is extracted to a temp folder under the library
+(`.vapor/mnt`) and read from there. Inno, NSIS, and MSI wrappers install
+unattended into a tracked folder. InstallShield disc kits (Doom 3 and
+similar) open the Setup wizard instead — quiet MSI mode hangs with no
+window. Play is offered only after that destination has a game binary
+plus data (`setup_state` `completed`). **Setup** retries if the wizard
+was cancelled or did not finish. **Remove** runs the game's uninstaller
+when one was recorded, and cancelling that uninstaller leaves the game
+installed. Retail SafeDisc executables are not
 launched; Doom 3 uses the dhewm3 source port (downloaded on first Play
 into `%LOCALAPPDATA%\Vapor\runtimes\dhewm3`). **Update** appears when
 the server has a newer version than the one on disk.
@@ -282,9 +290,11 @@ the server has a newer version than the one on disk.
 vapor whoami                 # which account is stored
 vapor info my-game           # versions, install path, playtime
 vapor installed              # local library
+vapor add PATH --name TITLE  # shortcut to a program already on this PC
+                             # (uninstall forgets the shortcut; files stay)
 vapor setup my-game          # retry a Windows installer that is still pending
 vapor verify my-game         # check an install against its manifest
-vapor uninstall my-game      # runs the game's uninstaller, then deletes its folders
+vapor uninstall my-game      # runs the recorded installer uninstall, then deletes folders
 vapor logout
 vapor config                 # print config path, server, library dir
 ```

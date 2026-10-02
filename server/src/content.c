@@ -164,3 +164,28 @@ done:
     free(file_real);
     return rc;
 }
+
+int
+vapord_saves_path(const vapord_config *cfg, int64_t user_id, const char *game_id,
+                  const char *leaf, char *out, size_t outsz)
+{
+    int n;
+
+    if (!cfg->saves_root[0] || user_id <= 0 || !vapor_id_is_valid(game_id)) {
+        return -1;
+    }
+    if (leaf && *leaf) {
+        if (strchr(leaf, '/') || strchr(leaf, '\\') || strstr(leaf, "..")) {
+            return -1;
+        }
+        n = snprintf(out, outsz, "%s/%lld/%s/%s", cfg->saves_root,
+                     (long long)user_id, game_id, leaf);
+    } else {
+        n = snprintf(out, outsz, "%s/%lld/%s", cfg->saves_root,
+                     (long long)user_id, game_id);
+    }
+    if (n < 0 || (size_t)n >= outsz) {
+        return -1;
+    }
+    return 0;
+}

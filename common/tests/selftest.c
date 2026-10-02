@@ -9,6 +9,7 @@
 #include "vapor/buf.h"
 #include "vapor/iso9660.h"
 #include "vapor/manifest.h"
+#include "vapor/saves.h"
 #include "vapor/sha256.h"
 #include "vapor/util.h"
 #include "vapor/wise.h"
@@ -275,10 +276,57 @@ test_manifest_roundtrip(void)
         check(m2.package.size == m.package.size, "size survives");
         check(m2.id && strcmp(m2.id, m.id) == 0, "id survives");
         check(m2.cover && strcmp(m2.cover, "cover.png") == 0, "cover survives");
+        check(m2.install.setup == NULL && m2.install.launch == NULL, "no install profile");
         vapor_manifest_free(&m2);
         free(text);
     }
     vapor_manifest_free(&m);
+
+    {
+        static const char *with_profile =
+            "{\"schema\":1,\"id\":\"disc-game\",\"name\":\"Disc Game\","
+            "\"version\":\"1\",\"package\":{\"file\":\"package.zip\","
+            "\"format\":\"zip\",\"size\":1,\"sha256\":\"e3b0c44298fc1c149afbf4"
+            "c8996fb92427ae41e4649b934ca495991b7852b855\"},"
+            "\"install\":{\"setup\":\"Setup/setup.exe\",\"launch\":\"game.exe\","
+            "\"uninstall\":\"unins000.exe\"},\"targets\":[]}";
+        static const char *bad_setup =
+            "{\"schema\":1,\"id\":\"disc-game\",\"name\":\"Disc Game\","
+            "\"version\":\"1\",\"package\":{\"file\":\"package.zip\","
+            "\"format\":\"zip\",\"size\":1,\"sha256\":\"e3b0c44298fc1c149afbf4"
+            "c8996fb92427ae41e4649b934ca495991b7852b855\"},"
+            "\"install\":{\"setup\":\"../setup.exe\"},\"targets\":[]}";
+
+        check(vapor_manifest_parse(with_profile, strlen(with_profile), &m, err,
+                                   sizeof(err))
+                  == 0,
+              "parses install profile");
+        check(m.install.setup && strcmp(m.install.setup, "Setup/setup.exe") == 0,
+              "install.setup");
+        check(m.install.launch && strcmp(m.install.launch, "game.exe") == 0,
+              "install.launch");
+        check(m.install.uninstall
+                  && strcmp(m.install.uninstall, "unins000.exe") == 0,
+              "install.uninstall");
+        text = vapor_manifest_serialize(&m);
+        check(text != NULL && strstr(text, "setup.exe") != NULL,
+              "serializes install profile");
+        vapor_manifest_free(&m);
+        if (text) {
+            check(vapor_manifest_parse(text, strlen(text), &m, err, sizeof(err))
+                      == 0,
+                  "reparses install profile");
+            check(m.install.setup
+                      && strcmp(m.install.setup, "Setup/setup.exe") == 0,
+                  "setup survives");
+            vapor_manifest_free(&m);
+            free(text);
+        }
+        check(vapor_manifest_parse(bad_setup, strlen(bad_setup), &m, err,
+                                   sizeof(err))
+                  != 0,
+              "rejects traversal in install.setup");
+    }
 
     /* Rejections that matter for safety. */
     {
@@ -506,6 +554,67 @@ test_iso9660(void)
         check(strcmp(got, payload) == 0, "ISO file contents");
     }
     remove(out_file);
+    {
+        const char    *bin_path = "vapor-iso-selftest.bin";
+        const char    *bin_dir = "vapor-iso-selftest-bin";
+        const char    *bin_file = "vapor-iso-selftest-bin/HELLO.TXT";
+        unsigned char *bin;
+        uint32_t       s;
+        int            mode;
+        size_t         bin_sz = 20u * 2352u;
+
+        bin = (unsigned char *)calloc(1, bin_sz);
+        check(bin != NULL, "allocates a BIN image");
+        if (bin) {
+            for (mode = 1; mode <= 2; mode++) {
+                uint32_t skip = mode == 2 ? 24u : 16u;
+
+                memset(bin, 0, bin_sz);
+                for (s = 0; s < 20; s++) {
+                    unsigned char *dst = bin + (size_t)s * 2352u;
+
+                    dst[0] = 0x00;
+                    memset(dst + 1, 0xff, 10);
+                    dst[11] = 0x00;
+                    dst[15] = (unsigned char)mode;
+                    memcpy(dst + skip, img + (size_t)s * 2048u, 2048);
+                }
+                f = fopen(bin_path, "wb");
+                check(f != NULL, "writes a raw BIN");
+                if (f) {
+                    check(fwrite(bin, 1, bin_sz, f) == bin_sz,
+                          "BIN bytes written");
+                    fclose(f);
+                }
+                check(vapor_iso_is_image(bin_path) == 1, "recognizes a BIN disc");
+                check(vapor_iso_extract(bin_path, bin_dir, err, sizeof(err)) == 0,
+                      mode == 2 ? "extracts a Mode 2 BIN" : "extracts a Mode 1 BIN");
+                f = fopen(bin_file, "rb");
+                check(f != NULL, "extracted HELLO.TXT from BIN");
+                if (f) {
+                    size_t n = fread(got, 1, sizeof(got) - 1, f);
+                    got[n] = '\0';
+                    fclose(f);
+                    check(strcmp(got, payload) == 0, "BIN file contents");
+                }
+                remove(bin_file);
+                remove(bin_path);
+#if defined(_WIN32)
+                _rmdir(bin_dir);
+#else
+                rmdir(bin_dir);
+#endif
+            }
+            free(bin);
+        }
+        f = fopen(bin_path, "wb");
+        if (f) {
+            fputs("not a disc", f);
+            fclose(f);
+        }
+        check(vapor_iso_is_image(bin_path) == 0, "ignores a data .bin");
+        remove(bin_path);
+    }
     remove(iso_path);
 #if defined(_WIN32)
     _rmdir(out_dir);
@@ -802,6 +911,158 @@ test_disc_finish_install(void)
 #endif
 }
 
+static void
+test_saves(void)
+{
+    uint8_t dos[0x40];
+    uint8_t pe[0x80];
+    char    err[256];
+    char    resolved[VAPOR_SAVE_PATH_MAX];
+    const char *specs[1];
+    int     missing = 0;
+    int     skipped = 0;
+    FILE   *f;
+    char    got[16];
+    const char *dir = "vapor-save-selftest";
+    const char *slot = "vapor-save-selftest/slot";
+    const char *restored = "vapor-save-selftest-out";
+    const char *zip = "vapor-save-selftest.zip";
+    static const char *json =
+        "{\"schema\":1,\"id\":\"doom\",\"name\":\"Doom\",\"version\":\"1\","
+        "\"install_mode\":\"portable\","
+        "\"saves\":[\"$INSTALL_DIR/slot\",\"D:\\\\Saves\\\\Doom\"],"
+        "\"package\":{\"file\":\"package.zip\",\"format\":\"zip\",\"size\":1,"
+        "\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b"
+        "7852b855\"},"
+        "\"targets\":[{\"platform\":\"windows\",\"arch\":\"x86_64\","
+        "\"runtime\":\"dosbox\",\"exec\":\"DOOM.EXE\"}]}";
+    static const char *bad_root =
+        "{\"schema\":1,\"id\":\"doom\",\"name\":\"Doom\",\"version\":\"1\","
+        "\"saves\":[\"D:\\\\\"],"
+        "\"package\":{\"file\":\"package.zip\",\"format\":\"zip\",\"size\":1,"
+        "\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b"
+        "7852b855\"},\"targets\":[]}";
+    static const char *bad_dot =
+        "{\"schema\":1,\"id\":\"doom\",\"name\":\"Doom\",\"version\":\"1\","
+        "\"saves\":[\"../windows\"],"
+        "\"package\":{\"file\":\"package.zip\",\"format\":\"zip\",\"size\":1,"
+        "\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b"
+        "7852b855\"},\"targets\":[]}";
+    vapor_manifest m;
+    char          *text;
+
+    puts("saves");
+    check(vapor_save_path_is_valid("SAVE") == 1, "relative save path");
+    check(vapor_save_path_is_valid("D:\\Saves\\Doom") == 1, "drive folder");
+    check(vapor_save_path_is_valid("$INSTALL_DIR\\SAVE") == 1, "install token");
+    check(vapor_save_path_is_valid("%USERPROFILE%\\Saved Games\\Doom") == 1,
+          "profile token");
+    check(vapor_save_path_is_valid("D:\\") == 0, "bare drive root rejected");
+    check(vapor_save_path_is_valid("C:") == 0, "bare drive letter rejected");
+    check(vapor_save_path_is_valid("/") == 0, "filesystem root rejected");
+    check(vapor_save_path_is_valid("../secret") == 0, "dotdot rejected");
+    check(vapor_save_path_is_valid("") == 0, "empty rejected");
+    check(vapor_install_mode_is_known("keep_disc") == 1, "keep_disc");
+    check(vapor_install_mode_is_known("guess") == 0, "unknown install mode");
+
+    memset(dos, 0, sizeof(dos));
+    dos[0] = 'M';
+    dos[1] = 'Z';
+    check(vapor_image_is_dos_mz(dos, sizeof(dos)) == 1, "MZ without PE is DOS");
+    memset(pe, 0, sizeof(pe));
+    pe[0] = 'M';
+    pe[1] = 'Z';
+    pe[0x3C] = 0x40;
+    pe[0x40] = 'P';
+    pe[0x41] = 'E';
+    check(vapor_image_is_dos_mz(pe, sizeof(pe)) == 0, "MZ+PE is not DOS");
+    check(vapor_dos_name_is_junk("install.com") == 1, "install.com is junk");
+    check(vapor_dos_name_is_junk("DOOM.COM") == 0, "DOOM.COM is a game");
+
+    check(vapor_manifest_parse(json, strlen(json), &m, err, sizeof(err)) == 0,
+          "parses save profile");
+    check(m.install_mode && strcmp(m.install_mode, "portable") == 0, "install_mode");
+    check(m.nsaves == 2, "two save paths");
+    check(m.targets && m.targets[0].runtime
+              && strcmp(m.targets[0].runtime, "dosbox") == 0,
+          "dosbox runtime");
+    text = vapor_manifest_serialize(&m);
+    vapor_manifest_free(&m);
+    check(text != NULL && strstr(text, "keep_disc") == NULL, "serializes profile");
+    if (text) {
+        check(strstr(text, "D:\\Saves\\Doom") != NULL
+                  || strstr(text, "D:\\\\Saves\\\\Doom") != NULL,
+              "save path survives serialize");
+        check(vapor_manifest_parse(text, strlen(text), &m, err, sizeof(err)) == 0,
+              "reparses save profile");
+        check(m.nsaves == 2 && m.install_mode
+                  && strcmp(m.install_mode, "portable") == 0,
+              "profile survives round trip");
+        vapor_manifest_free(&m);
+        free(text);
+    }
+    check(vapor_manifest_parse(bad_root, strlen(bad_root), &m, err, sizeof(err))
+              != 0,
+          "manifest rejects a bare drive");
+    check(vapor_manifest_parse(bad_dot, strlen(bad_dot), &m, err, sizeof(err)) != 0,
+          "manifest rejects dotdot");
+
+#if defined(_WIN32)
+    _mkdir(dir);
+    _mkdir(slot);
+    _mkdir(restored);
+#else
+    mkdir(dir, 0755);
+    mkdir(slot, 0755);
+    mkdir(restored, 0755);
+#endif
+    f = fopen("vapor-save-selftest/slot/slot1.sav", "wb");
+    check(f != NULL, "writes a save file");
+    if (f) {
+        fputs("progress", f);
+        fclose(f);
+    }
+    specs[0] = "slot";
+    err[0] = '\0';
+    check(vapor_saves_pack(specs, 1, dir, zip, &missing, err, sizeof(err)) == 0,
+          "packs a save root");
+    check(missing == 0, "save root was present");
+    specs[0] = "slot";
+    check(vapor_save_resolve("slot", restored, resolved, sizeof(resolved), err,
+                             sizeof(err))
+              == 0,
+          "resolves a relative save root");
+    check(vapor_saves_unpack(zip, specs, 1, restored, &skipped, err, sizeof(err))
+              == 0,
+          "unpacks a save archive");
+    check(skipped == 0, "every save root was restored");
+    f = fopen("vapor-save-selftest-out/slot/slot1.sav", "rb");
+    check(f != NULL, "restored save file exists");
+    got[0] = '\0';
+    if (f) {
+        if (!fgets(got, sizeof(got), f)) {
+            got[0] = '\0';
+        }
+        fclose(f);
+    }
+    check(strcmp(got, "progress") == 0, "restored save bytes");
+
+    remove("vapor-save-selftest/slot/slot1.sav");
+    remove("vapor-save-selftest-out/slot/slot1.sav");
+    remove(zip);
+#if defined(_WIN32)
+    _rmdir("vapor-save-selftest-out/slot");
+    _rmdir(restored);
+    _rmdir(slot);
+    _rmdir(dir);
+#else
+    rmdir("vapor-save-selftest-out/slot");
+    rmdir(restored);
+    rmdir(slot);
+    rmdir(dir);
+#endif
+}
+
 int
 main(void)
 {
@@ -816,6 +1077,7 @@ main(void)
     test_glob();
     test_buf();
     test_manifest_roundtrip();
+    test_saves();
     test_iso9660();
     test_iso9660_merge();
     test_wise();

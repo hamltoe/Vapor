@@ -11,6 +11,8 @@ set(VAPOR_CORE_SOURCES
     src/install.c
     src/installer.c
     src/launch.c
+    src/local.c
+    src/savesync.c
 )
 
 if(WIN32)
@@ -35,7 +37,7 @@ target_compile_options(vapor_core PRIVATE ${VAPOR_WARN_FLAGS})
 if(WIN32)
     # winhttp and shell32/ole32 (SHGetKnownFolderPath) ship with the Windows
     # SDK, so the Windows client has no third-party runtime dependency.
-    target_link_libraries(vapor_core PUBLIC winhttp shell32 ole32)
+    target_link_libraries(vapor_core PUBLIC winhttp shell32 ole32 comdlg32)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)

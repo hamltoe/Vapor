@@ -184,6 +184,32 @@ The package filename comes from the stored manifest, never from the URL.
 
 `HEAD` is accepted on the download route so a client can probe size.
 
+### `GET /api/v1/me/saves/{id}`
+
+Metadata for the signed-in user's save archive of that game. 404 when
+they have never uploaded one.
+
+```json
+{ "revision": 3, "sha256": "…", "size": 4096, "updated_at": 1710000000 }
+```
+
+### `GET /api/v1/me/saves/{id}/blob`
+
+The zip itself, `application/octet-stream`. Entry names are
+`<root-index>/<relative-path>` (or `<root-index>` for a single file),
+so a client writes them back only under the manifest `saves` paths.
+
+### `PUT /api/v1/me/saves/{id}?revision=N`
+
+Body is the zip, at most 256 MiB. `N` is the revision the client last
+saw (`0` when the account has no archive yet). A match stores the next
+revision and returns the same JSON as GET. A mismatch is `409` with the
+current revision in `message`. Two machines playing at once: the later
+exit replaces the blob; there is no merge.
+
+Saves are per user. They are not part of the shared game package, and
+removing a title from the catalog does not delete them.
+
 ## What is not in v1
 
 Every authenticated user sees the whole catalog. A per-user

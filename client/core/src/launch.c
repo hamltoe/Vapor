@@ -493,6 +493,500 @@ ensure_dhewm3(vapor_client *vc, const vapor_install *rec, char *out,
 #endif
 }
 
+static const char *
+find_ci(const char *hay, const char *needle)
+{
+    size_t n = strlen(needle);
+
+    if (n == 0) {
+        return hay;
+    }
+    for (; *hay; hay++) {
+        size_t i;
+
+        for (i = 0; i < n; i++) {
+            unsigned char a = (unsigned char)hay[i];
+            unsigned char b = (unsigned char)needle[i];
+
+            if (a >= 'A' && a <= 'Z') {
+                a = (unsigned char)(a - 'A' + 'a');
+            }
+            if (b >= 'A' && b <= 'Z') {
+                b = (unsigned char)(b - 'A' + 'a');
+            }
+            if (a != b) {
+                break;
+            }
+        }
+        if (i == n) {
+            return hay;
+        }
+    }
+    return NULL;
+}
+
+/* Next quoted value after `"key"`. Steam appmanifests are this shape. */
+static int
+acf_quoted(const char *text, const char *key, char *out, size_t outsz)
+{
+    char        pat[80];
+    const char *p = text;
+    int         n;
+
+    n = snprintf(pat, sizeof(pat), "\"%s\"", key);
+    if (n < 0 || (size_t)n >= sizeof(pat)) {
+        return -1;
+    }
+    while ((p = strstr(p, pat)) != NULL) {
+        size_t i = 0;
+
+        p += (size_t)n;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+            p++;
+        }
+        if (*p != '"') {
+            continue;
+        }
+        p++;
+        while (*p && *p != '"' && i + 1 < outsz) {
+            out[i++] = *p++;
+        }
+        if (*p != '"') {
+            return -1;
+        }
+        out[i] = '\0';
+        return out[0] ? 0 : -1;
+    }
+    return -1;
+}
+
+static int
+all_digits(const char *s)
+{
+    if (!s || !s[0]) {
+        return 0;
+    }
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+typedef struct {
+    char steamapps[VAPOR_PATH_MAX];
+    char installdir[VAPOR_PATH_MAX];
+    char appid[32];
+    char launcher[VAPOR_PATH_MAX];
+} steam_lookup;
+
+static void
+unescape_backslashes(char *s)
+{
+    char *r = s;
+    char *w = s;
+
+    while (*r) {
+        if (r[0] == '\\' && r[1] == '\\') {
+            *w++ = '\\';
+            r += 2;
+            continue;
+        }
+        *w++ = *r++;
+    }
+    *w = '\0';
+}
+
+static int
+steam_manifest_cb(const char *name, void *ud)
+{
+    steam_lookup *s = ud;
+    char          path[VAPOR_PATH_MAX];
+    char          dir[VAPOR_PATH_MAX];
+    char          id[32];
+    char         *text;
+    size_t        nlen;
+
+    nlen = strlen(name);
+    if (nlen < strlen("appmanifest_.acf") || !vapor_str_has_prefix(name, "appmanifest_")
+        || !vapor_str_ends_with_ci(name, ".acf")) {
+        return 0;
+    }
+    if ((size_t)snprintf(path, sizeof(path), "%s/%s", s->steamapps, name)
+        >= sizeof(path)) {
+        return 0;
+    }
+    vapor_plat_native_path(path);
+    text = vapor_read_file(path, NULL);
+    if (!text) {
+        return 0;
+    }
+    if (acf_quoted(text, "installdir", dir, sizeof(dir)) == 0
+        && vapor_str_eq_ci(dir, s->installdir)
+        && acf_quoted(text, "appid", id, sizeof(id)) == 0 && all_digits(id)) {
+        snprintf(s->appid, sizeof(s->appid), "%s", id);
+        if (acf_quoted(text, "LauncherPath", s->launcher, sizeof(s->launcher))
+            == 0) {
+            unescape_backslashes(s->launcher);
+            vapor_plat_native_path(s->launcher);
+        }
+        free(text);
+        return 1;
+    }
+    free(text);
+    return 0;
+}
+
+/* 0 if `out_appid` is the Steam id for an exe under steamapps/common/<dir>.
+ * `out_launcher` receives steam.exe when the manifest names it. */
+static int
+steam_appid_for_exe(const char *exe, char *out_appid, size_t outsz,
+                    char *out_launcher, size_t launchersz)
+{
+    static const char MARK[] = "/steamapps/common/";
+    steam_lookup      look;
+    char              norm[VAPOR_PATH_MAX];
+    const char       *mark;
+    const char       *start;
+    const char       *slash;
+    size_t            n;
+    int               rc;
+
+    if ((size_t)snprintf(norm, sizeof(norm), "%s", exe) >= sizeof(norm)) {
+        return -1;
+    }
+    for (n = 0; norm[n]; n++) {
+        if (norm[n] == '\\') {
+            norm[n] = '/';
+        }
+    }
+    mark = find_ci(norm, MARK);
+    if (!mark) {
+        return -1;
+    }
+    start = mark + strlen(MARK);
+    slash = strchr(start, '/');
+    if (!slash || slash == start) {
+        return -1;
+    }
+    memset(&look, 0, sizeof(look));
+    n = (size_t)(slash - start);
+    if (n >= sizeof(look.installdir)) {
+        return -1;
+    }
+    memcpy(look.installdir, start, n);
+    look.installdir[n] = '\0';
+    /* mark points at "/steamapps/..."; keep the steamapps directory itself. */
+    n = (size_t)(mark - norm) + strlen("/steamapps");
+    if (n >= sizeof(look.steamapps)) {
+        return -1;
+    }
+    memcpy(look.steamapps, norm, n);
+    look.steamapps[n] = '\0';
+    vapor_plat_native_path(look.steamapps);
+
+    rc = vapor_plat_list_dir(look.steamapps, steam_manifest_cb, &look);
+    if (rc < 0 || !look.appid[0]) {
+        return -1;
+    }
+    if ((size_t)snprintf(out_appid, outsz, "%s", look.appid) >= outsz) {
+        return -1;
+    }
+    if (out_launcher && launchersz) {
+        out_launcher[0] = '\0';
+        if (look.launcher[0]
+            && (size_t)snprintf(out_launcher, launchersz, "%s", look.launcher)
+                   >= launchersz) {
+            out_launcher[0] = '\0';
+        }
+    }
+    return 0;
+}
+
+/* The user pointed at this program. Do not read a manifest, do not rewrite
+ * the directory, and do not swap in a source port. Returns 1 when Steam
+ * starts the game and this process does not wait for it. */
+static int
+launch_external(vapor_client *vc, const vapor_install *rec, int *out_exit)
+{
+    char    exec_path[VAPOR_PATH_MAX];
+    char    cwd_path[VAPOR_PATH_MAX];
+    char  **argv = NULL;
+    int64_t started, elapsed;
+    int     exit_code = -1, rc = -1;
+
+    if (!rec->launch_exe[0]) {
+        vapor_client_set_error(vc, "%s has no program to launch",
+                               rec->name[0] ? rec->name : rec->game_id);
+        return -1;
+    }
+    snprintf(exec_path, sizeof(exec_path), "%s", rec->launch_exe);
+    vapor_plat_native_path(exec_path);
+
+    /* Starting the exe ourselves pops Steam's "please launch this from the
+     * Steam client" dialog. Ask Steam to start that install instead. */
+    {
+        char appid[32];
+        char launcher[VAPOR_PATH_MAX];
+        char params[64];
+        char url[64];
+        int  handed = 0;
+
+        if (steam_appid_for_exe(exec_path, appid, sizeof(appid), launcher,
+                                sizeof(launcher))
+            == 0) {
+            if (!launcher[0] || !vapor_plat_exists(launcher)) {
+                launcher[0] = '\0';
+                if (vapor_plat_search_path("steam.exe", launcher, sizeof(launcher))
+                        != 0
+                    && vapor_plat_search_path("steam", launcher, sizeof(launcher))
+                           != 0) {
+                    launcher[0] = '\0';
+                }
+            }
+            printf("launching %s through Steam (app %s)\n",
+                   rec->name[0] ? rec->name : rec->game_id, appid);
+            fflush(stdout);
+            /* The raw exe only shows Steam's "launch this from the Steam
+             * client" dialog. steam.exe -applaunch is the shortcut Steam
+             * itself uses; the steam:// URL is the fallback. */
+            if (launcher[0]
+                && (size_t)snprintf(params, sizeof(params), "-applaunch %s",
+                                    appid)
+                       < sizeof(params)
+                && vapor_plat_start(launcher, params) == 0) {
+                handed = 1;
+            }
+            if (!handed
+                && (size_t)snprintf(url, sizeof(url), "steam://rungameid/%s",
+                                    appid)
+                       < sizeof(url)
+                && vapor_plat_open_url(url) == 0) {
+                handed = 1;
+            }
+            if (!handed) {
+                vapor_client_set_error(vc,
+                                       "could not ask Steam to start %s. Open "
+                                       "the Steam client and try Play again",
+                                       rec->name[0] ? rec->name : rec->game_id);
+                return -1;
+            }
+            if (out_exit) {
+                *out_exit = 0;
+            }
+            return 1;
+        }
+    }
+
+    if (!vapor_plat_exists(exec_path) || vapor_plat_is_dir(exec_path)) {
+        vapor_client_set_error(vc,
+                               "cannot start %s; %s is not there. Vapor did not "
+                               "move it — the shortcut only remembers the path",
+                               rec->name[0] ? rec->name : rec->game_id, exec_path);
+        return -1;
+    }
+    if (vapor_exe_is_copy_protected(exec_path)) {
+        vapor_client_set_error(vc,
+                               "this executable uses SafeDisc (SECDRV), which "
+                               "Windows blocked. The administrator dialog is "
+                               "that DRM, not a login. Point the shortcut at "
+                               "the publisher's patch or a source-port exe");
+        return -1;
+    }
+    if (rec->install_dir[0] && vapor_plat_is_dir(rec->install_dir)) {
+        snprintf(cwd_path, sizeof(cwd_path), "%s", rec->install_dir);
+    } else {
+        parent_dir(exec_path, cwd_path, sizeof(cwd_path));
+    }
+    vapor_plat_native_path(cwd_path);
+    if (refuse_missing_dlls(vc, exec_path) != 0) {
+        return -1;
+    }
+
+    argv = (char **)calloc(2, sizeof(*argv));
+    if (!argv) {
+        vapor_client_set_error(vc, "out of memory");
+        return -1;
+    }
+    argv[0] = vapor_strdup(exec_path);
+    if (!argv[0]) {
+        vapor_client_set_error(vc, "out of memory");
+        free(argv);
+        return -1;
+    }
+
+    printf("launching %s\n", rec->name[0] ? rec->name : rec->game_id);
+    fflush(stdout);
+
+    started = vapor_now_unix();
+    if (vapor_plat_run(exec_path, argv, cwd_path, NULL, 0, &exit_code) != 0) {
+        vapor_client_set_error(vc, "could not start %s", exec_path);
+        goto cleanup;
+    }
+    elapsed = vapor_now_unix() - started;
+    if (elapsed < 0) {
+        elapsed = 0;
+    }
+    vapor_db_add_playtime(vc, rec->game_id, started, elapsed);
+    {
+        char pretty[64];
+        vapor_format_duration(elapsed, pretty, sizeof(pretty));
+        if (exit_code == 0) {
+            printf("%s exited normally after %s\n",
+                   rec->name[0] ? rec->name : rec->game_id, pretty);
+        } else {
+            printf("%s exited with code %d after %s\n",
+                   rec->name[0] ? rec->name : rec->game_id, exit_code, pretty);
+        }
+    }
+    if (out_exit) {
+        *out_exit = exit_code;
+    }
+    rc = 0;
+
+cleanup:
+    free(argv[0]);
+    free(argv);
+    return rc;
+}
+
+static int
+resolve_dosbox(vapor_client *vc, char *out, size_t outsz)
+{
+#if !defined(_WIN32)
+    (void)out;
+    (void)outsz;
+    vapor_client_set_error(vc, "DOSBox launch on Linux is not available yet");
+    return -1;
+#else
+    static const char *const known[] = {
+        "C:\\Program Files\\DOSBox Staging\\dosbox.exe",
+        "C:\\Program Files (x86)\\DOSBox Staging\\dosbox.exe",
+        "C:\\Program Files\\DOSBox\\DOSBox.exe",
+        NULL
+    };
+    size_t i;
+
+    if (vc->cfg.dosbox_path[0]) {
+        if (!vapor_plat_exists(vc->cfg.dosbox_path)) {
+            vapor_client_set_error(vc, "dosbox_path does not exist: %s",
+                                   vc->cfg.dosbox_path);
+            return -1;
+        }
+        if ((size_t)snprintf(out, outsz, "%s", vc->cfg.dosbox_path) >= outsz) {
+            vapor_client_set_error(vc, "dosbox_path is too long");
+            return -1;
+        }
+        return 0;
+    }
+    if (vapor_plat_search_path("dosbox.exe", out, outsz) == 0
+        || vapor_plat_search_path("dosbox", out, outsz) == 0) {
+        return 0;
+    }
+    for (i = 0; known[i]; i++) {
+        if (vapor_plat_exists(known[i])
+            && (size_t)snprintf(out, outsz, "%s", known[i]) < outsz) {
+            return 0;
+        }
+    }
+    {
+        const char *local_app = getenv("LOCALAPPDATA");
+        char        local[VAPOR_PATH_MAX];
+
+        if (local_app
+            && (size_t)snprintf(local, sizeof(local),
+                                "%s\\DOSBox Staging\\dosbox.exe", local_app)
+                   < sizeof(local)
+            && vapor_plat_exists(local)) {
+            snprintf(out, outsz, "%s", local);
+            return 0;
+        }
+    }
+    vapor_client_set_error(vc,
+                           "DOSBox was not found. Install DOSBox Staging, or "
+                           "set dosbox_path in the client config "
+                           "(vapor config dosbox PATH)");
+    return -1;
+#endif
+}
+
+static void
+to_dos_path(char *s)
+{
+    for (; *s; s++) {
+        if (*s == '/') {
+            *s = '\\';
+        }
+    }
+}
+
+static int
+write_dosbox_conf(vapor_client *vc, const char *install_dir, const char *exec_rel,
+                  const char *cwd, char *conf_out, size_t confsz)
+{
+    char  dir[VAPOR_PATH_MAX];
+    char  mounted[VAPOR_PATH_MAX];
+    char  exec_dos[VAPOR_PATH_MAX];
+    char  cwd_dos[VAPOR_PATH_MAX];
+    FILE *f;
+    int   have_cwd = 0;
+
+    if ((size_t)snprintf(dir, sizeof(dir), "%s/.vapor", install_dir) >= sizeof(dir)
+        || (size_t)snprintf(conf_out, confsz, "%s/dosbox.conf", dir) >= confsz) {
+        vapor_client_set_error(vc, "DOSBox config path is too long");
+        return -1;
+    }
+    if (vapor_plat_mkdirs(dir) != 0) {
+        vapor_client_set_error(vc, "cannot create %s", dir);
+        return -1;
+    }
+    if ((size_t)snprintf(mounted, sizeof(mounted), "%s", install_dir) >= sizeof(mounted)
+        || (size_t)snprintf(exec_dos, sizeof(exec_dos), "%s", exec_rel ? exec_rel : "")
+               >= sizeof(exec_dos)) {
+        vapor_client_set_error(vc, "DOSBox launch path is too long");
+        return -1;
+    }
+    vapor_plat_native_path(mounted);
+    to_dos_path(exec_dos);
+    if (strchr(mounted, '"') || strchr(exec_dos, '"')) {
+        vapor_client_set_error(vc, "DOSBox cannot mount a path that contains a quote");
+        return -1;
+    }
+    cwd_dos[0] = '\0';
+    if (cwd && cwd[0] && strcmp(cwd, ".") != 0) {
+        if ((size_t)snprintf(cwd_dos, sizeof(cwd_dos), "%s", cwd) >= sizeof(cwd_dos)) {
+            vapor_client_set_error(vc, "DOSBox working directory is too long");
+            return -1;
+        }
+        to_dos_path(cwd_dos);
+        if (strchr(cwd_dos, '"')) {
+            vapor_client_set_error(vc, "DOSBox cannot cd to a path that contains a quote");
+            return -1;
+        }
+        have_cwd = 1;
+    }
+    vapor_plat_native_path(conf_out);
+    f = fopen(conf_out, "w");
+    if (!f) {
+        vapor_client_set_error(vc, "cannot write %s", conf_out);
+        return -1;
+    }
+    fprintf(f, "[autoexec]\n");
+    fprintf(f, "mount C \"%s\"\n", mounted);
+    fprintf(f, "C:\n");
+    if (have_cwd) {
+        fprintf(f, "cd %s\n", cwd_dos);
+    }
+    fprintf(f, "%s\n", exec_dos);
+    fprintf(f, "exit\n");
+    if (fclose(f) != 0) {
+        vapor_client_set_error(vc, "cannot write %s", conf_out);
+        return -1;
+    }
+    return 0;
+}
+
 int
 vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
 {
@@ -501,6 +995,7 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
     const vapor_target *t;
     char                install_dir[VAPOR_PATH_MAX];
     char                exec_path[VAPOR_PATH_MAX];
+    char                launch_rel[VAPOR_PATH_MAX] = "";
     char                cwd_path[VAPOR_PATH_MAX];
     char              **argv = NULL;
     vapor_kv           *env = NULL;
@@ -508,11 +1003,17 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
     int64_t             started, elapsed;
     int                 exit_code = -1, rc = -1;
     int                 use_dhewm3 = 0;
+    int                 use_dosbox = 0;
+    char                dosbox_exe[VAPOR_PATH_MAX];
+    char                conf_path[VAPOR_PATH_MAX];
 
     if (vapor_db_get_install(vc, game_id, &rec) != 0) {
         vapor_client_set_error(vc, "%s is not installed; run \"vapor install %s\"",
                                game_id, game_id);
         return -1;
+    }
+    if (vapor_install_is_external(&rec)) {
+        return launch_external(vc, &rec, out_exit);
     }
     snprintf(install_dir, sizeof(install_dir), "%s", rec.install_dir);
     vapor_disc_finish_install(install_dir);
@@ -539,19 +1040,49 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
         return -1;
     }
     if (t->runtime && *t->runtime && strcmp(t->runtime, "native") != 0) {
-        /* The schema allows "proton"/"wine"; nothing implements them yet, and
-         * silently running the binary natively would just fail confusingly. */
+        if (strcmp(t->runtime, "dosbox") != 0) {
+            /* The schema allows later runtimes such as "proton"/"wine".
+             * Naming one stores it; Play says which launcher is missing. */
+            vapor_client_set_error(vc,
+                                   "%s needs the \"%s\" runtime, which this build "
+                                   "does not support yet", game_id, t->runtime);
+            vapor_manifest_free(&m);
+            return -1;
+        }
+        use_dosbox = 1;
+    }
+    if (use_dosbox && m.install_mode && strcmp(m.install_mode, "keep_disc") == 0) {
         vapor_client_set_error(vc,
-                               "%s needs the \"%s\" runtime, which this build "
-                               "does not support yet", game_id, t->runtime);
+                               "%s keeps its disc images, and CD mount is not "
+                               "available yet",
+                               rec.name[0] ? rec.name : game_id);
+        vapor_manifest_free(&m);
+        return -1;
+    }
+    if (use_dosbox && strcmp(vapor_host_platform(), "windows") != 0) {
+        vapor_client_set_error(vc, "DOSBox launch on Linux is not available yet");
         vapor_manifest_free(&m);
         return -1;
     }
     {
         const char *rel = t->exec ? t->exec : "";
-        const char *base = strrchr(rel, '/');
+        const char *base;
+        char        profile_path[VAPOR_PATH_MAX];
+
+        if (rec.profile_launch[0]
+            && (size_t)snprintf(profile_path, sizeof(profile_path), "%s/%s",
+                                install_dir, rec.profile_launch)
+                   < sizeof(profile_path)) {
+            vapor_plat_native_path(profile_path);
+            if (vapor_plat_exists(profile_path)
+                && !vapor_plat_is_dir(profile_path)) {
+                rel = rec.profile_launch;
+            }
+        }
+        base = strrchr(rel, '/');
 
         base = base ? base + 1 : rel;
+        snprintf(launch_rel, sizeof(launch_rel), "%s", rel);
         if (vapor_str_has_prefix(rel, "Setup/")
             || vapor_str_has_prefix(rel, "setup/")
             || vapor_str_has_prefix(rel, "DirectX/")
@@ -563,6 +1094,12 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
             || vapor_str_has_prefix(base, "setup_")
             || vapor_str_has_prefix(base, "instmsi")) {
             rec.setup_pending = 1;
+            snprintf(rec.setup_state, sizeof(rec.setup_state), "%s",
+                     VAPOR_SETUP_PENDING);
+            if (!rec.install_kind[0]) {
+                snprintf(rec.install_kind, sizeof(rec.install_kind), "%s",
+                         VAPOR_INSTALL_KIND_OS_PRODUCT);
+            }
             (void)vapor_db_record_install(vc, &rec);
             vapor_client_set_error(vc,
                                    "%s still needs its Windows installer; run "
@@ -574,7 +1111,7 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
     }
 
     if ((size_t)snprintf(exec_path, sizeof(exec_path), "%s/%s", install_dir,
-                         t->exec)
+                         launch_rel)
         >= sizeof(exec_path)) {
         vapor_client_set_error(vc, "launch path is too long");
         vapor_manifest_free(&m);
@@ -585,12 +1122,12 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
         vapor_client_set_error(vc,
                                "the launch target %s is missing; run "
                                "\"vapor install %s --force\" to repair",
-                               t->exec, game_id);
+                               launch_rel, game_id);
         vapor_manifest_free(&m);
         return -1;
     }
 
-    if (vapor_exe_is_copy_protected(exec_path)) {
+    if (!use_dosbox && vapor_exe_is_copy_protected(exec_path)) {
         char alt[VAPOR_PATH_MAX];
 
         /* Running the wrapped exe just pops SafeDisc's fake administrator
@@ -603,7 +1140,7 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
                                                  sizeof(alt))
                           == 0) {
             snprintf(exec_path, sizeof(exec_path), "%s", alt);
-        } else if (looks_doom3_tree(install_dir, game_id, t->exec)) {
+        } else if (looks_doom3_tree(install_dir, game_id, launch_rel)) {
             if (ensure_dhewm3(vc, &rec, alt, sizeof(alt)) != 0) {
                 vapor_manifest_free(&m);
                 return -1;
@@ -637,23 +1174,46 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
     }
     vapor_plat_native_path(cwd_path);
 
-    if (!use_dhewm3 && refuse_missing_dlls(vc, exec_path) != 0) {
+    if (!use_dosbox && !use_dhewm3 && refuse_missing_dlls(vc, exec_path) != 0) {
         vapor_manifest_free(&m);
         return -1;
     }
 
-    argv_n = use_dhewm3 ? 3 : t->nargs;
+    if (use_dosbox) {
+        if (resolve_dosbox(vc, dosbox_exe, sizeof(dosbox_exe)) != 0) {
+            goto cleanup;
+        }
+        if (write_dosbox_conf(vc, install_dir, launch_rel, t->cwd, conf_path,
+                              sizeof(conf_path))
+            != 0) {
+            goto cleanup;
+        }
+    }
+    if (vapor_saves_before_play(vc, &m, install_dir) != 0) {
+        goto cleanup;
+    }
+
+    argv_n = use_dosbox ? 4 : (use_dhewm3 ? 3 : t->nargs);
     argv = (char **)calloc(argv_n + 2, sizeof(*argv));
     if (!argv) {
         vapor_client_set_error(vc, "out of memory");
         vapor_manifest_free(&m);
         return -1;
     }
-    argv[0] = vapor_strdup(exec_path);
+    argv[0] = vapor_strdup(use_dosbox ? dosbox_exe : exec_path);
     if (!argv[0]) {
         goto cleanup;
     }
-    if (use_dhewm3) {
+    if (use_dosbox) {
+        argv[1] = vapor_strdup("-conf");
+        argv[2] = vapor_strdup(conf_path);
+        argv[3] = vapor_strdup("-noconsole");
+        argv[4] = vapor_strdup("-exit");
+        if (!argv[1] || !argv[2] || !argv[3] || !argv[4]) {
+            vapor_client_set_error(vc, "out of memory");
+            goto cleanup;
+        }
+    } else if (use_dhewm3) {
         argv[1] = vapor_strdup("+set");
         argv[2] = vapor_strdup("fs_basepath");
         argv[3] = vapor_strdup(install_dir);
@@ -672,7 +1232,7 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
     }
     argv[argv_n + 1] = NULL;
 
-    if (t->nenv > 0) {
+    if (!use_dosbox && t->nenv > 0) {
         env = (vapor_kv *)calloc(t->nenv, sizeof(*env));
         if (!env) {
             vapor_client_set_error(vc, "out of memory");
@@ -694,13 +1254,19 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
     if (use_dhewm3) {
         printf("using source port %s\n", exec_path);
     }
+    if (use_dosbox) {
+        printf("using DOSBox %s\n", dosbox_exe);
+    }
     /* Flushed before spawning: the child writes straight to the fd, so leaving
      * our own output buffered would interleave it out of order. */
     fflush(stdout);
 
     started = vapor_now_unix();
-    if (vapor_plat_run(exec_path, argv, cwd_path, env, nenv, &exit_code) != 0) {
-        vapor_client_set_error(vc, "could not start %s", exec_path);
+    if (vapor_plat_run(use_dosbox ? dosbox_exe : exec_path, argv, cwd_path, env,
+                       nenv, &exit_code)
+        != 0) {
+        vapor_client_set_error(vc, "could not start %s",
+                               use_dosbox ? dosbox_exe : exec_path);
         goto cleanup;
     }
     elapsed = vapor_now_unix() - started;
@@ -725,7 +1291,7 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
     if (out_exit) {
         *out_exit = exit_code;
     }
-    rc = 0;
+    rc = vapor_saves_after_play(vc, &m, install_dir) == 0 ? 0 : -1;
 
 cleanup:
     if (argv) {

@@ -59,6 +59,8 @@ vapor_http_request(vapor_client *vc, const char *method, const char *path,
     req.method = method;
     req.url = url;
     req.body = json_body;
+    req.body_len = json_body ? strlen(json_body) : 0;
+    req.content_type = NULL;
     req.bearer = auth ? vc->cfg.token : NULL;
     req.pinned_pubkey = vc->cfg.pinned_pubkey[0] ? vc->cfg.pinned_pubkey : NULL;
 
@@ -135,6 +137,44 @@ vapor_api_put(vapor_client *vc, const char *path, const char *json_body,
     return finish_api_call(vc, out,
                            vapor_http_request(vc, "PUT", path, json_body, auth,
                                               out));
+}
+
+int
+vapor_http_put_bytes(vapor_client *vc, const char *path, const void *body,
+                     size_t len, int auth, vapor_response *out)
+{
+    vapor_net_req req;
+    vapor_net_res res;
+    char          url[VAPOR_PATH_MAX + 256];
+
+    memset(out, 0, sizeof(*out));
+    if (build_url(vc, path, url, sizeof(url)) != 0) {
+        return -1;
+    }
+    if (auth && !vapor_client_has_token(vc)) {
+        vapor_client_set_error(vc, "not signed in; run \"vapor login\"");
+        return -1;
+    }
+    memset(&req, 0, sizeof(req));
+    req.method = "PUT";
+    req.url = url;
+    req.body = (const char *)body;
+    req.body_len = len;
+    req.content_type = "application/octet-stream";
+    req.bearer = auth ? vc->cfg.token : NULL;
+    req.pinned_pubkey = vc->cfg.pinned_pubkey[0] ? vc->cfg.pinned_pubkey : NULL;
+    memset(&res, 0, sizeof(res));
+    if (vapor_net_perform(&req, &res) != 0) {
+        vapor_client_set_error(vc, "%s", res.err[0] ? res.err : "request failed");
+        vapor_net_res_free(&res);
+        return -1;
+    }
+    out->status = res.status;
+    out->body = res.body;
+    out->body_len = res.body_len;
+    res.body = NULL;
+    vapor_net_res_free(&res);
+    return 0;
 }
 
 int

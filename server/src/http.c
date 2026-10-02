@@ -109,6 +109,67 @@ vapord_read_body(struct mg_connection *c, size_t *out_len)
     return vapor_buf_release(&b);
 }
 
+int
+vapord_read_body_file(struct mg_connection *c, const char *dest,
+                      uint64_t max_bytes, uint64_t *out_size, char *err,
+                      size_t errsz)
+{
+    const struct mg_request_info *ri = mg_get_request_info(c);
+    FILE                         *f;
+    char                          tmp[8192];
+    int                           n;
+    uint64_t                      total = 0;
+
+    if (out_size) {
+        *out_size = 0;
+    }
+    if (ri->content_length > (long long)max_bytes) {
+        snprintf(err, errsz, "save archive is larger than %llu bytes",
+                 (unsigned long long)max_bytes);
+        return -1;
+    }
+    f = fopen(dest, "wb");
+    if (!f) {
+        snprintf(err, errsz, "cannot write %s", dest);
+        return -1;
+    }
+    while ((n = mg_read(c, tmp, sizeof(tmp))) > 0) {
+        if (total > max_bytes || (uint64_t)n > max_bytes - total) {
+            fclose(f);
+            remove(dest);
+            snprintf(err, errsz, "save archive is larger than %llu bytes",
+                     (unsigned long long)max_bytes);
+            return -1;
+        }
+        if (fwrite(tmp, 1, (size_t)n, f) != (size_t)n) {
+            fclose(f);
+            remove(dest);
+            snprintf(err, errsz, "cannot write %s", dest);
+            return -1;
+        }
+        total += (uint64_t)n;
+    }
+    if (fclose(f) != 0) {
+        remove(dest);
+        snprintf(err, errsz, "cannot write %s", dest);
+        return -1;
+    }
+    if (n < 0) {
+        remove(dest);
+        snprintf(err, errsz, "upload ended early");
+        return -1;
+    }
+    if (total == 0) {
+        remove(dest);
+        snprintf(err, errsz, "save archive is empty");
+        return -1;
+    }
+    if (out_size) {
+        *out_size = total;
+    }
+    return 0;
+}
+
 cJSON *
 vapord_read_json(struct mg_connection *c, char *err, size_t errsz)
 {

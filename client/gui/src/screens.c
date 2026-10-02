@@ -211,6 +211,10 @@ header_height(const vapor_app *app, int busy)
     if (app->show_settings) {
         h += 3 * (ROW_H + GAP);
     }
+    if (app->show_add_local) {
+        /* Hint plus name, program, and the button row. */
+        h += 36.0f + GAP + 3 * (ROW_H + GAP);
+    }
     if (app->notice[0]) {
         h += 22 + GAP;
     }
@@ -234,6 +238,7 @@ draw_toolbar(struct nk_context *ctx, vapor_app *app, int busy)
     } else {
         nk_layout_row_template_push_dynamic(ctx);
     }
+    nk_layout_row_template_push_static(ctx, 100);
     nk_layout_row_template_push_static(ctx, 90);
     nk_layout_row_template_push_static(ctx, 90);
     nk_layout_row_template_end(ctx);
@@ -258,6 +263,15 @@ draw_toolbar(struct nk_context *ctx, vapor_app *app, int busy)
     }
 
     if (busy) {
+        nk_label_colored(ctx, "Add game", NK_TEXT_CENTERED, COL_MUTED_V);
+    } else if (nk_button_label(ctx, app->show_add_local ? "Close" : "Add game")) {
+        app->show_add_local = !app->show_add_local;
+        if (app->show_add_local) {
+            app->show_settings = 0;
+        }
+    }
+
+    if (busy) {
         nk_label_colored(ctx, "working", NK_TEXT_CENTERED, COL_MUTED_V);
     } else if (nk_button_label(ctx, "Refresh")) {
         vapor_gui_start_refresh(app);
@@ -265,6 +279,9 @@ draw_toolbar(struct nk_context *ctx, vapor_app *app, int busy)
 
     if (nk_button_label(ctx, app->show_settings ? "Close" : "Settings")) {
         app->show_settings = !app->show_settings;
+        if (app->show_settings) {
+            app->show_add_local = 0;
+        }
     }
 }
 
@@ -317,6 +334,117 @@ draw_settings(struct nk_context *ctx, vapor_app *app, int busy)
         app->catalog_loaded = 0;
         app->selected_id[0] = '\0';
         vapor_gui_notice(app, 0, "signed out");
+    }
+    nk_layout_row_end(ctx);
+}
+
+static void
+suggest_local_name(vapor_app *app)
+{
+    const char *path = app->local_exe;
+    const char *base;
+    const char *slash;
+    const char *bslash;
+    const char *dot;
+    size_t      n;
+
+    if (app->local_name_len > 0 || !path[0]) {
+        return;
+    }
+    slash = strrchr(path, '/');
+    bslash = strrchr(path, '\\');
+    if (bslash > slash) {
+        slash = bslash;
+    }
+    base = (slash && slash[1]) ? slash + 1 : path;
+    dot = strrchr(base, '.');
+    n = (dot && dot != base) ? (size_t)(dot - base) : strlen(base);
+    if (n == 0) {
+        return;
+    }
+    if (n >= sizeof(app->local_name)) {
+        n = sizeof(app->local_name) - 1;
+    }
+    memcpy(app->local_name, base, n);
+    app->local_name[n] = '\0';
+    app->local_name_len = (int)n;
+}
+
+static void
+draw_add_local(struct nk_context *ctx, vapor_app *app, int busy)
+{
+    nk_layout_row_dynamic(ctx, 36, 1);
+    nk_label_wrap(ctx,
+                  "Point at a program already on this computer. Vapor only "
+                  "launches it. Removing it from the library leaves the files "
+                  "where they are.");
+
+    nk_layout_row_template_begin(ctx, ROW_H);
+    nk_layout_row_template_push_static(ctx, 70);
+    nk_layout_row_template_push_dynamic(ctx);
+    nk_layout_row_template_end(ctx);
+    nk_label_colored(ctx, "Name", NK_TEXT_LEFT, COL_MUTED_V);
+    nk_edit_string(ctx, NK_EDIT_FIELD, app->local_name, &app->local_name_len,
+                   (int)sizeof(app->local_name) - 1, nk_filter_default);
+
+    nk_layout_row_template_begin(ctx, ROW_H);
+    nk_layout_row_template_push_static(ctx, 70);
+    nk_layout_row_template_push_dynamic(ctx);
+    nk_layout_row_template_push_static(ctx, 90);
+    nk_layout_row_template_end(ctx);
+    nk_label_colored(ctx, "Program", NK_TEXT_LEFT, COL_MUTED_V);
+    nk_edit_string(ctx, NK_EDIT_FIELD, app->local_exe, &app->local_exe_len,
+                   (int)sizeof(app->local_exe) - 1, nk_filter_default);
+    if (busy) {
+        nk_label_colored(ctx, "Browse", NK_TEXT_CENTERED, COL_MUTED_V);
+    } else if (nk_button_label(ctx, "Browse")) {
+        char picked[VAPOR_PATH_MAX];
+        int  pr;
+
+        pr = vapor_pick_executable(picked, sizeof(picked));
+        if (pr == 0) {
+            snprintf(app->local_exe, sizeof(app->local_exe), "%s", picked);
+            app->local_exe_len = (int)strlen(app->local_exe);
+            suggest_local_name(app);
+        } else if (pr < 0) {
+            vapor_gui_notice(app, 1,
+                             "No file picker on this system. Type the path to "
+                             "the program.");
+        }
+    }
+
+    nk_layout_row_begin(ctx, NK_STATIC, ROW_H, 3);
+    nk_layout_row_push(ctx, 70);
+    nk_spacing(ctx, 1);
+    nk_layout_row_push(ctx, 150);
+    if (!busy && nk_button_label(ctx, "Add to library")) {
+        char id[VAPOR_ID_MAX + 1];
+
+        app->local_name[app->local_name_len] = '\0';
+        app->local_exe[app->local_exe_len] = '\0';
+        suggest_local_name(app);
+        if (vapor_add_local_game(app->vc,
+                                 app->local_name[0] ? app->local_name : NULL,
+                                 app->local_exe, id, sizeof(id))
+            != 0) {
+            vapor_gui_notice(app, 1, "%s", app->vc->err);
+        } else {
+            snprintf(app->pending_select, sizeof(app->pending_select), "%s", id);
+            vapor_gui_notice(app, 0,
+                             "Added %s. Removing it from the library leaves the "
+                             "files in place.",
+                             app->local_name[0] ? app->local_name : id);
+            app->local_name[0] = '\0';
+            app->local_name_len = 0;
+            app->local_exe[0] = '\0';
+            app->local_exe_len = 0;
+            app->show_add_local = 0;
+            vapor_gui_start_refresh(app);
+        }
+    }
+    nk_layout_row_push(ctx, 90);
+    if (!busy && nk_button_label(ctx, "Cancel")) {
+        app->show_add_local = 0;
     }
     nk_layout_row_end(ctx);
 }
@@ -482,7 +610,9 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
 
     rating_text(e, rate, sizeof(rate));
     nk_layout_row_dynamic(ctx, 16, 1);
-    if (rate[0]) {
+    if (e->external) {
+        nk_label_colored(ctx, "local shortcut", NK_TEXT_LEFT, COL_MUTED_V);
+    } else if (rate[0]) {
         nk_label_colored(ctx, rate, NK_TEXT_LEFT, COL_WARN_V);
     } else {
         vapor_format_bytes(e->size, size, sizeof(size));
@@ -492,7 +622,18 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
     }
 
     nk_layout_row_dynamic(ctx, 16, 1);
-    if (e->update_available) {
+    if (e->external) {
+        if (e->play_seconds > 0) {
+            char played_for[64];
+            vapor_format_duration(e->play_seconds, played_for, sizeof(played_for));
+            snprintf(line, sizeof(line), "on this computer   %s played",
+                     played_for);
+        } else {
+            snprintf(line, sizeof(line), "on this computer");
+        }
+        state = line;
+        state_col = COL_GOOD_V;
+    } else if (e->update_available) {
         snprintf(line, sizeof(line), "update from %s", e->installed_version);
         state = line;
         state_col = COL_WARN_V;
@@ -604,29 +745,49 @@ draw_detail(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
         nk_label_colored(ctx, e->developer[0] ? e->developer : e->id,
                          NK_TEXT_LEFT, COL_MUTED_V);
 
-        rating_text(e, rate, sizeof(rate));
-        nk_layout_row_dynamic(ctx, 18, 1);
-        if (rate[0]) {
-            nk_label_colored(ctx, rate, NK_TEXT_LEFT, COL_WARN_V);
-        } else {
-            nk_label_colored(ctx, "no Steam rating yet", NK_TEXT_LEFT, COL_MUTED_V);
-        }
-
-        if (e->rating_votes > 0) {
-            snprintf(line, sizeof(line), "Vapor community  %.1f / 5  (%d)",
-                     e->rating_avg, e->rating_votes);
+        if (!e->external) {
+            rating_text(e, rate, sizeof(rate));
             nk_layout_row_dynamic(ctx, 18, 1);
-            nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_GOOD_V);
+            if (rate[0]) {
+                nk_label_colored(ctx, rate, NK_TEXT_LEFT, COL_WARN_V);
+            } else {
+                nk_label_colored(ctx, "no Steam rating yet", NK_TEXT_LEFT,
+                                 COL_MUTED_V);
+            }
+
+            if (e->rating_votes > 0) {
+                snprintf(line, sizeof(line), "Vapor community  %.1f / 5  (%d)",
+                         e->rating_avg, e->rating_votes);
+                nk_layout_row_dynamic(ctx, 18, 1);
+                nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_GOOD_V);
+            }
+
+            vapor_format_bytes(e->size, size, sizeof(size));
+            snprintf(line, sizeof(line), "%s   %s",
+                     e->latest_version[0] ? e->latest_version : "-", size);
+            nk_layout_row_dynamic(ctx, 18, 1);
+            nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_MUTED_V);
+        } else {
+            nk_layout_row_dynamic(ctx, 18, 1);
+            nk_label_colored(ctx, "local shortcut", NK_TEXT_LEFT, COL_MUTED_V);
+            nk_layout_row_dynamic(ctx, 36, 1);
+            nk_label_wrap(ctx,
+                          "Play starts this program. Remove only forgets the "
+                          "shortcut.");
         }
 
-        vapor_format_bytes(e->size, size, sizeof(size));
-        snprintf(line, sizeof(line), "%s   %s",
-                 e->latest_version[0] ? e->latest_version : "-", size);
         nk_layout_row_dynamic(ctx, 18, 1);
-        nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_MUTED_V);
-
-        nk_layout_row_dynamic(ctx, 18, 1);
-        if (e->update_available) {
+        if (e->external) {
+            if (e->play_seconds > 0) {
+                char played[64];
+                vapor_format_duration(e->play_seconds, played, sizeof(played));
+                snprintf(line, sizeof(line), "on this computer   %s played",
+                         played);
+                nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_GOOD_V);
+            } else {
+                nk_label_colored(ctx, "on this computer", NK_TEXT_LEFT, COL_GOOD_V);
+            }
+        } else if (e->update_available) {
             snprintf(line, sizeof(line), "update available from %s",
                      e->installed_version);
             nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_WARN_V);
@@ -648,6 +809,7 @@ draw_detail(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
         nk_layout_row_dynamic(ctx, 10, 1);
         nk_spacing(ctx, 1);
 
+        if (!e->external) {
         nk_layout_row_begin(ctx, NK_STATIC, ROW_H, 6);
         nk_layout_row_push(ctx, 88);
         nk_label_colored(ctx, "Your rating", NK_TEXT_LEFT, COL_MUTED_V);
@@ -677,12 +839,14 @@ draw_detail(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
             }
         }
         nk_layout_row_end(ctx);
+        }
 
         nk_group_end(ctx);
     }
 
     nk_layout_row_dynamic(ctx, 18, 1);
-    nk_label_colored(ctx, "Description", NK_TEXT_LEFT, COL_MUTED_V);
+    nk_label_colored(ctx, e->external ? "Launches" : "Description", NK_TEXT_LEFT,
+                     COL_MUTED_V);
     nk_layout_row_dynamic(ctx, desc_height(ctx, e->description[0]
                                                ? e->description
                                                : "No description yet."), 1);
@@ -700,7 +864,18 @@ draw_detail(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
         return;
     }
 
-    if (e->installed && e->setup_pending) {
+    if (e->external) {
+        nk_layout_row_begin(ctx, NK_STATIC, ROW_H, 2);
+        nk_layout_row_push(ctx, 88);
+        if (nk_button_label(ctx, "Play")) {
+            vapor_gui_start_launch(app, e->id);
+        }
+        nk_layout_row_push(ctx, 180);
+        if (nk_button_label(ctx, "Remove from library")) {
+            vapor_gui_start_uninstall(app, e->id);
+        }
+        nk_layout_row_end(ctx);
+    } else if (e->installed && e->setup_pending) {
         nk_layout_row_dynamic(ctx, ROW_H, 2);
         if (nk_button_label(ctx, "Setup")) {
             vapor_gui_start_setup(app, e->id);
@@ -743,6 +918,9 @@ vapor_gui_library_screen(struct nk_context *ctx, vapor_app *app, int w, int h)
         draw_toolbar(ctx, app, busy);
         if (app->show_settings) {
             draw_settings(ctx, app, busy);
+        }
+        if (app->show_add_local) {
+            draw_add_local(ctx, app, busy);
         }
         draw_notice(ctx, app);
         if (busy) {
@@ -790,8 +968,9 @@ vapor_gui_library_screen(struct nk_context *ctx, vapor_app *app, int w, int h)
                 nk_label_colored(ctx,
                                  !app->catalog_loaded ? "Loading the catalog..."
                                  : app->ngames == 0
-                                     ? "The catalog is empty. Publish a game with "
-                                       "vapor-admin on the server."
+                                     ? "The library is empty. Add a game already "
+                                       "on this computer, or publish one on the "
+                                       "server."
                                      : "Nothing matches that search.",
                                  NK_TEXT_LEFT, COL_MUTED_V);
             }

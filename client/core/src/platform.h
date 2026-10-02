@@ -42,13 +42,19 @@ int vapor_plat_walk_files(const char *root, vapor_plat_walk_fn fn, void *ud);
 int vapor_plat_run(const char *exec, char *const argv[], const char *cwd,
                    const vapor_kv *env, size_t nenv, int *out_exit);
 
+/* Non-zero means the caller wants the running installer stopped. */
+typedef int (*vapor_plat_cancel_fn)(void *ud);
+
 /* Show a windowed installer and wait until it and any helper processes it
  * started (msiexec, a second setup.exe, InstallShield engines) have exited.
  * `params` is the argument string (silent flags, msiexec switches); NULL
  * means none. On Windows this uses ShellExecuteEx so a required-administrator
- * manifest can prompt for elevation. */
+ * manifest can prompt for elevation. `cancel` is polled while waiting; when
+ * it returns non-zero the launched process and new helper processes are
+ * terminated. Returns 0 if the process exited (*out_exit set), 1 if cancel
+ * fired, -1 if it could not be started. `cancel` may be NULL. */
 int vapor_plat_run_ui(const char *exec, const char *cwd, const char *params,
-                      int *out_exit);
+                      int *out_exit, vapor_plat_cancel_fn cancel, void *ud);
 
 /* Look up a Windows Uninstall entry / Program Files folder matching `name`
  * or `id`. 0 if `out` was filled, 1 if nothing matched. The folder must
@@ -64,10 +70,11 @@ int vapor_plat_guess_product_dir(const char *name, const char *id, char *out,
 /* Resolve `name` on PATH. 0 if `out` is filled. */
 int vapor_plat_search_path(const char *name, char *out, size_t outsz);
 
-/* Windows uninstall entry for a product whose display name matches `name`
- * or `id`. Prefers QuietUninstallString. 0 if `out_exe` was filled.
- * `out_dir` receives InstallLocation when the key has one. Steam
- * (steam.exe / steam://) entries are ignored. */
+/* Windows uninstall entry. Prefers a key whose InstallLocation matches
+ * `install_dir`, then a DisplayName slug match on `name` / `id`. Prefers
+ * QuietUninstallString. 0 if `out_exe` was filled. `out_dir` receives
+ * InstallLocation when the key has one. Steam (steam.exe / steam://)
+ * entries are ignored. */
 int vapor_plat_find_uninstall(const char *name, const char *id,
                               const char *install_dir, char *out_exe,
                               size_t exesz, char *out_params, size_t paramsz,
@@ -82,5 +89,26 @@ int vapor_plat_missing_dlls(const char *exe, char *out, size_t outsz);
 /* Path separator normalisation: the manifest always uses '/', Windows APIs
  * mostly accept it, but launching wants native separators. */
 void vapor_plat_native_path(char *path);
+
+/* Absolute form of `path`. 0 if `out` was filled. The path should already
+ * exist; this is for remembering a program the user pointed at. */
+int vapor_plat_absolute(const char *path, char *out, size_t outsz);
+
+/* Modal "open file" dialog. 0 if `out` was filled, 1 if cancelled, -1 if no
+ * dialog is available on this system. */
+int vapor_plat_pick_file(char *out, size_t outsz);
+
+/* Non-recursive directory listing. `fn` is called with each entry name.
+ * Return 0 from `fn` to continue, or non-zero to stop (that value is returned). */
+typedef int (*vapor_plat_dir_fn)(const char *name, void *ud);
+int vapor_plat_list_dir(const char *dir, vapor_plat_dir_fn fn, void *ud);
+
+/* Hand `url` to the system (a steam:// link, for example). Does not wait for
+ * the target program. 0 if the handler accepted it. */
+int vapor_plat_open_url(const char *url);
+
+/* Start `exe` with `params` (may be NULL) and do not wait. 0 if the shell
+ * accepted the request. */
+int vapor_plat_start(const char *exe, const char *params);
 
 #endif /* VAPOR_PLATFORM_H */

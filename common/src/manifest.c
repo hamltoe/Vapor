@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "vapor/saves.h"
 #include "vapor/util.h"
 
 const char *
@@ -89,6 +90,11 @@ vapor_manifest_free(vapor_manifest *m)
     free(m->package.file);
     free(m->package.format);
     free(m->package.strip_prefix);
+    free(m->install.setup);
+    free(m->install.launch);
+    free(m->install.uninstall);
+    free(m->install_mode);
+    free_str_array(m->saves, m->nsaves);
     for (i = 0; i < m->ntargets; i++) {
         target_free(&m->targets[i]);
     }
@@ -202,6 +208,55 @@ json_dup_env(const cJSON *obj, const char *key, vapor_kv **out, size_t *outn)
     }
     *out = v;
     *outn = i;
+    return 0;
+}
+
+static void
+slashify(char *s)
+{
+    if (!s) {
+        return;
+    }
+    for (; *s; s++) {
+        if (*s == '\\') {
+            *s = '/';
+        }
+    }
+}
+
+static int
+manifest_rel_ok(const char *p)
+{
+    if (!p || !*p) {
+        return 1;
+    }
+    if (p[0] == '/' || p[0] == '\\') {
+        return 0;
+    }
+    if (strstr(p, "..")) {
+        return 0;
+    }
+    return 1;
+}
+
+static int
+take_install_field(char **slot, const cJSON *obj, const char *key, char *err,
+                   size_t errsz, const char *label)
+{
+    *slot = json_dup_string(obj, key);
+    if (*slot && !**slot) {
+        free(*slot);
+        *slot = NULL;
+    }
+    slashify(*slot);
+    if (!manifest_rel_ok(*slot)) {
+        if (err && errsz) {
+            snprintf(err, errsz,
+                     "\"install.%s\" must be a relative path without \"..\"",
+                     label);
+        }
+        return -1;
+    }
     return 0;
 }
 
@@ -321,6 +376,44 @@ vapor_manifest_parse(const char *json, size_t len, vapor_manifest *out,
         memcpy(out->package.sha256, sh->valuestring, VAPOR_SHA256_HEX_LEN + 1);
     }
 
+    {
+        const cJSON *inst = cJSON_GetObjectItemCaseSensitive(root, "install");
+
+        if (inst && !cJSON_IsNull(inst)) {
+            if (!cJSON_IsObject(inst)) {
+                FAIL("\"install\" must be an object");
+            }
+            if (take_install_field(&out->install.setup, inst, "setup", err,
+                                   errsz, "setup")
+                    != 0
+                || take_install_field(&out->install.launch, inst, "launch", err,
+                                      errsz, "launch")
+                       != 0
+                || take_install_field(&out->install.uninstall, inst, "uninstall",
+                                      err, errsz, "uninstall")
+                       != 0) {
+                goto fail;
+            }
+        }
+    }
+
+    out->install_mode = json_dup_string(root, "install_mode");
+    if (out->install_mode && !vapor_install_mode_is_known(out->install_mode)) {
+        FAIL("\"install_mode\" must be portable, setup, unpack_disc, or keep_disc");
+    }
+    if (json_dup_string_array(root, "saves", &out->saves, &out->nsaves) != 0) {
+        FAIL("\"saves\" must be an array of strings");
+    }
+    if (out->nsaves > VAPOR_SAVE_MAX_PATHS) {
+        FAIL("\"saves\" has more than %d paths", VAPOR_SAVE_MAX_PATHS);
+    }
+    for (i = 0; i < out->nsaves; i++) {
+        if (!vapor_save_path_is_valid(out->saves[i])) {
+            FAIL("\"saves\" entry is not allowed: %s", out->saves[i]);
+        }
+    }
+    i = 0;
+
     targets = cJSON_GetObjectItemCaseSensitive(root, "targets");
     if (!cJSON_IsArray(targets)) {
         FAIL("\"targets\" array is required");
@@ -418,6 +511,38 @@ vapor_manifest_serialize(const vapor_manifest *m)
     if (m->package.strip_prefix
         && !cJSON_AddStringToObject(pkg, "strip_prefix", m->package.strip_prefix)) {
         goto done;
+    }
+
+    if (m->install.setup || m->install.launch || m->install.uninstall) {
+        cJSON *inst = cJSON_AddObjectToObject(root, "install");
+
+        if (!inst) { goto done; }
+        if (m->install.setup
+            && !cJSON_AddStringToObject(inst, "setup", m->install.setup)) {
+            goto done;
+        }
+        if (m->install.launch
+            && !cJSON_AddStringToObject(inst, "launch", m->install.launch)) {
+            goto done;
+        }
+        if (m->install.uninstall
+            && !cJSON_AddStringToObject(inst, "uninstall", m->install.uninstall)) {
+            goto done;
+        }
+    }
+
+    if (m->install_mode
+        && !cJSON_AddStringToObject(root, "install_mode", m->install_mode)) {
+        goto done;
+    }
+    if (m->nsaves) {
+        cJSON *saves = cJSON_AddArrayToObject(root, "saves");
+        if (!saves) { goto done; }
+        for (i = 0; i < m->nsaves; i++) {
+            cJSON *s = cJSON_CreateString(m->saves[i] ? m->saves[i] : "");
+            if (!s) { goto done; }
+            cJSON_AddItemToArray(saves, s);
+        }
     }
 
     targets = cJSON_AddArrayToObject(root, "targets");

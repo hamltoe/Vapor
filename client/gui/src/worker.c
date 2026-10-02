@@ -190,11 +190,19 @@ job_main(void *ud)
         vapor_catalog_entry *rows = NULL;
         vapor_cover         *covers = NULL;
         size_t               n = 0, i;
+        char                 warn[512];
 
+        warn[0] = '\0';
         set_status(app, "loading the catalog...");
         if (vapor_catalog_fetch(vc, &rows, &n) != 0) {
             finish(app, 1, "%s", vc->err);
             break;
+        }
+        if (vc->err[0]) {
+            /* Server catalog failed, but shortcuts on this computer are
+             * still in `rows`. This stays a successful job so the UI keeps
+             * those rows. */
+            snprintf(warn, sizeof(warn), "%s", vc->err);
         }
         if (n > 0) {
             covers = (vapor_cover *)calloc(n, sizeof(*covers));
@@ -219,7 +227,7 @@ job_main(void *ud)
         app->pending_games = rows;
         app->pending_covers = covers;
         app->pending_ngames = n;
-        finish(app, 0, "%s", "");
+        finish(app, 0, "%s", warn);
         break;
     }
 
@@ -233,17 +241,45 @@ job_main(void *ud)
         opts.on_status = on_status;
         opts.on_status_ud = app;
         set_status(app, "fetching the manifest for %s...", game_id);
-        if (vapor_install_game(vc, game_id, version[0] ? version : "latest",
-                               &opts, on_progress, app)
-            != 0) {
-            int cancelled;
-            SDL_LockMutex(app->job.lock);
-            cancelled = app->job.cancel;
-            SDL_UnlockMutex(app->job.lock);
-            finish(app, cancelled ? 0 : 1, "%s",
-                   vc->err[0] ? vc->err
-                              : (cancelled ? "install cancelled" : "install failed"));
-            break;
+        {
+            int src = vapor_install_game(vc, game_id,
+                                         version[0] ? version : "latest", &opts,
+                                         on_progress, app);
+
+            if (src < 0) {
+                int cancelled;
+                SDL_LockMutex(app->job.lock);
+                cancelled = app->job.cancel;
+                SDL_UnlockMutex(app->job.lock);
+                finish(app, cancelled ? 0 : 1, "%s",
+                       vc->err[0] ? vc->err
+                                  : (cancelled ? "install cancelled"
+                                               : "install failed"));
+                break;
+            }
+            if (src > 0) {
+                vapor_install rec;
+                int           cancelled = 0;
+
+                SDL_LockMutex(app->job.lock);
+                cancelled = app->job.cancel;
+                SDL_UnlockMutex(app->job.lock);
+                if (vapor_db_get_install(vc, game_id, &rec) == 0
+                    && strcmp(rec.setup_state, VAPOR_SETUP_CANCELLED) == 0) {
+                    finish(app, cancelled ? 0 : 1, "%s",
+                           vc->err[0] ? vc->err
+                                      : "installer was cancelled; run Setup to retry");
+                } else if (vapor_db_get_install(vc, game_id, &rec) == 0
+                           && strcmp(rec.setup_state, VAPOR_SETUP_FAILED) == 0) {
+                    finish(app, 1, "%s",
+                           vc->err[0] ? vc->err : "installer failed to start");
+                } else if (vc->err[0]) {
+                    finish(app, 0, "%s", vc->err);
+                } else {
+                    finish(app, 0, "downloaded %s; run Setup to finish", game_id);
+                }
+                break;
+            }
         }
         {
             vapor_install rec;
@@ -264,14 +300,48 @@ job_main(void *ud)
         break;
     }
 
-    case JOB_UNINSTALL:
-        set_status(app, "removing %s...", game_id);
-        if (vapor_uninstall_game(vc, game_id) != 0) {
-            finish(app, 1, "%s", vc->err);
+    case JOB_UNINSTALL: {
+        vapor_install rec;
+        int           external = 0;
+        char          label[256];
+
+        snprintf(label, sizeof(label), "%s", game_id);
+        if (vapor_db_get_install(vc, game_id, &rec) == 0) {
+            external = vapor_install_is_external(&rec);
+            if (rec.name[0]) {
+                snprintf(label, sizeof(label), "%s", rec.name);
+            }
+        } else {
+            memset(&rec, 0, sizeof(rec));
+        }
+        if (external) {
+            set_status(app, "removing the shortcut for %s...", label);
+        } else if (strcmp(rec.install_kind, VAPOR_INSTALL_KIND_OS_PRODUCT) == 0
+                   || rec.uninstall_exe[0] || rec.setup_pending) {
+            set_status(app, "running the uninstaller for %s...", game_id);
+        } else {
+            set_status(app, "removing %s...", game_id);
+        }
+        if (vapor_uninstall_game_cancellable(vc, game_id, on_progress, app)
+            != 0) {
+            int cancelled;
+
+            SDL_LockMutex(app->job.lock);
+            cancelled = app->job.cancel;
+            SDL_UnlockMutex(app->job.lock);
+            finish(app, cancelled ? 0 : 1, "%s",
+                   vc->err[0] ? vc->err : "could not remove the game");
             break;
         }
-        finish(app, 0, "removed %s", game_id);
+        if (external) {
+            finish(app, 0,
+                   "removed %s from the library; the files were left in place",
+                   label);
+        } else {
+            finish(app, 0, "removed %s", game_id);
+        }
         break;
+    }
 
     case JOB_VERIFY: {
         int rc;
@@ -292,9 +362,17 @@ job_main(void *ud)
         int exit_code = 0;
 
         set_status(app, "starting %s...", game_id);
-        if (vapor_launch_game(vc, game_id, &exit_code) != 0) {
-            finish(app, 1, "%s", vc->err);
-            break;
+        {
+            int src = vapor_launch_game(vc, game_id, &exit_code);
+
+            if (src < 0) {
+                finish(app, 1, "%s", vc->err);
+                break;
+            }
+            if (src > 0) {
+                finish(app, 0, "started %s through Steam", game_id);
+                break;
+            }
         }
         if (exit_code != 0) {
             finish(app, 1, "%s exited with code %d", game_id, exit_code);
@@ -308,15 +386,20 @@ job_main(void *ud)
         int src;
 
         set_status(app, "running the installer for %s...", game_id);
-        src = vapor_setup_game(vc, game_id);
+        src = vapor_setup_game_tracked(vc, game_id, on_progress, app);
         if (src < 0) {
             finish(app, 1, "%s", vc->err);
             break;
         }
         if (src > 0) {
-            finish(app, 1, "%s",
+            int cancelled;
+
+            SDL_LockMutex(app->job.lock);
+            cancelled = app->job.cancel;
+            SDL_UnlockMutex(app->job.lock);
+            finish(app, cancelled ? 0 : 1, "%s",
                    vc->err[0] ? vc->err
-                              : "installer finished, but the game was not found");
+                              : "installer was cancelled; run Setup to retry");
             break;
         }
         finish(app, 0, "%s is ready to play", game_id);
@@ -525,6 +608,11 @@ vapor_gui_job_poll(vapor_app *app)
         break;
     case JOB_REFRESH:
         vapor_gui_covers_adopt_pending(app);
+        if (app->pending_select[0]) {
+            snprintf(app->selected_id, sizeof(app->selected_id), "%s",
+                     app->pending_select);
+            app->pending_select[0] = '\0';
+        }
         break;
     case JOB_INSTALL:
     case JOB_UNINSTALL:

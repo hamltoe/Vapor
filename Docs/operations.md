@@ -54,8 +54,11 @@ Desktop and Start Menu:
 powershell -File scripts/start-wsl-server.ps1 shortcut
 ```
 
-The host window needs WSLg. `scripts\stop-server.cmd` stops it. The player
-client is `build-windows\bin\vapor-gui.exe` at `http://127.0.0.1:8777`.
+The host window needs WSLg. If the title is `[WARN:COPY MODE]` and the
+window is blank, WSLg lost its shared-memory mount. From PowerShell run
+`wsl --shutdown`, then start the server again. `scripts\stop-server.cmd`
+stops vapord. The player client is `build-windows\bin\vapor-gui.exe` at
+`http://127.0.0.1:8777`.
 
 ## First local run
 
@@ -137,7 +140,7 @@ Point `library_root` at a directory of games (config `library_root`, or
     cover.png             # optional
   Some RPG/
     disc.iso              # unpacked into content_root as package.zip;
-                          # multiple .iso files in the folder are merged;
+                          # .iso, .img, and BIN/CUE .bin in the folder are merged;
                           # originals left in place
   Portable Game/
     Game.exe              # unpacked tree; zipped into content_root
@@ -149,22 +152,30 @@ Point `library_root` at a directory of games (config `library_root`, or
 
 The folder name becomes the catalog title; a slug of that name is the
 id (`Hollow Knight` → `hollow-knight`). Discovery prefers a zip, then
-an unpacked executable tree, then an ISO. Every `.iso` / `.img` in the
-folder is unpacked (ISO 9660 / Joliet) into one tree, so a three-disc
-set like Doom 3 is merged. If the disc ships a Wise installer, that is
-unpacked too and those files are zipped; the original disc images are
-left in the drop folder. After unpack, `autorun.exe` / `autorun.inf` are
+an unpacked executable tree, then an ISO. Every `.iso`, `.img`, and
+BIN/CUE `.bin` in the folder is unpacked (ISO 9660 / Joliet, including
+raw 2352-byte sectors) into one tree, so a three-disc set is merged.
+If the disc ships a Wise installer, that is unpacked too and those files
+are zipped; the original disc images are left in the drop folder. After unpack, `autorun.exe` / `autorun.inf` are
 dropped. A tiny root `*.DAT` is removed only when a larger file of the
 same name exists in a subdirectory (a CD volume stub next to real data).
 Launch picking ignores installers, CD autorun stubs named `launch.exe`,
-plus updaters named `upd.exe`, `*up.exe`, or `*update.exe`. Files under
-`Setup/` are installer staging, not a finished install. When the client
-still has a `setup.exe` or `.msi` after extract, it runs that wizard
-locally and records the real install location before Play is offered.
-The install is complete only when that destination (silent folder, or
-the Uninstall / Program Files path the wizard created) has a game
-binary plus data and has stopped growing — not merely because
-setup.exe returned 0. InstallShield disc kits skip silent `/qn` (it
+plus updaters named `upd.exe`, `*up.exe`, or `*update.exe`. A publisher
+patch exe dropped next to the disc (a name containing `patch`) is packed
+into the install folder and is not chosen as the launch target. Files under
+`Setup/` are installer staging, not a finished install. A leftover disc
+image is extracted on the client into `<library>/.vapor/mnt/<id>` and
+read from there; a portable tree is copied into the library folder, and
+an installer kit is run from the mount. The image is not handed to the
+shell. When the client still has a `setup.exe` or `.msi` after extract,
+or `vapor.json` names `setup_exec`, it runs that installer locally and
+records the real install location before Play is offered. The install
+is complete only when that destination (silent folder, or the Uninstall
+/ Program Files path the wizard created) has a game binary plus data
+and has stopped growing — not merely because setup.exe returned 0.
+`setup_state` is `completed` only then. Cancel during the wizard, or a
+wizard that exits without that tree, records `cancelled` and keeps the
+mount for `vapor setup`. InstallShield disc kits skip silent `/qn` (it
 hangs on msiexec with no window) and show the Setup wizard instead.
 Play refuses SafeDisc/SECDRV wrappers (the fake administrator-login
 dialog those exes show on Windows 10+) and looks for a patched exe or
@@ -176,12 +187,25 @@ reports companion DLLs that are not next to it (`binkw32.dll`,
 `libfreespace.dll`, and similar). Those files have to be the copies that
 shipped with the game. `steam_api.dll` is not emulated.
 
-Uninstall runs the Windows uninstall entry for that product when one
-matches the game (QuietUninstallString, otherwise UninstallString,
-otherwise `unins000.exe` / `uninstall.exe` in the install folder), then
-deletes the recorded folders, including a Program Files tree the
-installer created. Cancelling the uninstaller leaves the install in
-place.
+Each install is recorded as a kind: `portable` (files only in the
+library), `os_product` (a Windows installer registered the game with
+the OS), `runtime` (same files as portable; Play will wrap DOSBox /
+Wine later), or `external` (a program already on this computer; Play
+launches it and Remove only forgets the shortcut).
+
+After a Windows setup finishes, the client writes the
+vendor uninstall command, the chosen setup and launch paths, and
+InstallLocation into SQLite and `<payload>/.vapor/install.json`, then
+deletes the disc mount. Remove prefers the profile uninstaller when
+that file exists, then the recorded command. If the sidecar or row is
+missing (an older install), it rediscovers the uninstaller by
+InstallLocation first, then DisplayName, then a recursive search for
+`unins000.exe` / `uninstall.exe`. An MSI with no recorded command is
+removed with `msiexec /x`. `portable` and `runtime` titles only delete
+the recorded folders. Shared runtimes under the client data dir
+(`runtimes/dhewm3` and later DOSBox / Wine) are never removed with a
+game. Cancelling the vendor uninstaller leaves the install in place.
+Remove also deletes `<library>/.vapor/mnt/<id>` when the product is gone.
 The GUI status during Install is download → extract → Windows
 installer; a full progress bar after the zip lands is extract/setup,
 not Verify.
@@ -273,6 +297,23 @@ shows **Update** and runs a forced install of that version.
 There is no background updater. Refresh the catalog (or reopen the GUI)
 to see new versions after you ingest them.
 
+## Account saves
+
+A game's `vapor.json` can list `saves`. Those paths — next to the game,
+under the user profile, or on another drive — are the only files that
+sync. Play downloads the account archive before the process starts and
+uploads it after the process exits, for the user who is signed in. A
+game with no `saves` list, a local shortcut, or a signed-out client
+does not sync. Offline play still works; the upload waits until the
+next signed-in session that can see a change.
+
+Two PCs playing the same game at the same time do not merge. The later
+exit replaces the account copy. A missing path is reported and skipped.
+One archive is limited to 256 MiB and 10,000 files.
+
+The files live in `saves_root` (default: a `saves` directory beside
+`db_path`), one zip per user per game.
+
 ## Closing registration
 
 Once the household accounts exist:
@@ -289,10 +330,11 @@ before anyone types a password.
 ## What this prototype does not do
 
 - Per-user entitlements (every signed-in user sees every game).
-- Wine / Proton launches (`targets[].runtime` is reserved for that).
+- Wine / Proton launches (`targets[].runtime` can name them; Play says the runtime is not built yet).
 - Enabling SafeDisc (`SECDRV.SYS`) on modern Windows.
-- Cloud saves, friends, or a storefront.
+- Friends or a storefront.
 - Windows-hosted vapord.
+- DOSBox on Linux, and CD `imgmount` for DOS games that ship as disc images.
 - Automatic client self-update.
 
 Those can be added without changing the API prefix or the manifest

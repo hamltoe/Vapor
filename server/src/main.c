@@ -76,6 +76,9 @@ dispatch(struct mg_connection *c, void *cbdata)
     if (vapor_str_has_prefix(tail, "/download/")) {
         return vapord_route_download(app, c, method, tail);
     }
+    if (vapor_str_has_prefix(tail, "/me/saves/")) {
+        return vapord_route_saves(app, c, method, tail);
+    }
     return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND, "no such endpoint");
 }
 
@@ -157,6 +160,7 @@ main(int argc, char **argv)
         fprintf(stderr, "vapord: port out of range\n");
         return 1;
     }
+    vapord_config_finish(&app.cfg);
 
     if (vapord_auth_init(err, sizeof(err)) != 0) {
         fprintf(stderr, "vapord: %s\n", err);
@@ -168,6 +172,12 @@ main(int argc, char **argv)
     if (vapord_content_mkdirs(app.cfg.content_root) != 0) {
         fprintf(stderr, "vapord: cannot create content_root \"%s\"\n",
                 app.cfg.content_root);
+        return 1;
+    }
+    if (app.cfg.saves_root[0]
+        && vapord_content_mkdirs(app.cfg.saves_root) != 0) {
+        fprintf(stderr, "vapord: cannot create saves_root \"%s\"\n",
+                app.cfg.saves_root);
         return 1;
     }
     if (app.cfg.library_root[0]

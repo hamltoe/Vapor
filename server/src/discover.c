@@ -9,13 +9,14 @@
  *       vapor.json           (optional overrides)
  *     Disc Game/
  *       Disc 1.iso          (all images unpacked into one tree, then zipped;
- *       Disc 2.iso           originals left in the drop folder)
+ *       Disc 2.bin           .iso, .img, and BIN/CUE .bin; originals stay)
  *     Portable Game/
  *       Game.exe
  *       data/
  *
- * Zip files already sitting in library_root are served in place. ISO files
- * are unpacked (ISO 9660 / Joliet); every image in the folder is merged.
+ * Zip files already sitting in library_root are served in place. ISO and
+ * BIN/CUE images (.iso, .img, .bin) are unpacked (ISO 9660 / Joliet); every
+ * image in the folder is merged.
  * A Wise SETUP.EXE on the disc is unpacked too, and the files are zipped into
  * <content_root>/<id>/<version>/package.zip; the original disc images are left
  * in the drop folder. A folder of loose files is zipped the same way.
@@ -36,6 +37,7 @@
 
 #include "miniz.h"
 #include "vapor/iso9660.h"
+#include "vapor/saves.h"
 #include "vapor/sha256.h"
 #include "vapor/util.h"
 #include "vapor/wise.h"
@@ -433,10 +435,57 @@ unpack_wise_installers(const char *dir)
 }
 
 static int
+contains_ci(const char *s, const char *needle)
+{
+    size_t n, i, j;
+
+    if (!s || !needle) {
+        return 0;
+    }
+    n = strlen(needle);
+    if (n == 0) {
+        return 0;
+    }
+    for (i = 0; s[i]; i++) {
+        for (j = 0; j < n; j++) {
+            unsigned char a = (unsigned char)s[i + j];
+            unsigned char b = (unsigned char)needle[j];
+
+            if (a == 0) {
+                return 0;
+            }
+            if (a >= 'A' && a <= 'Z') {
+                a = (unsigned char)(a - 'A' + 'a');
+            }
+            if (b >= 'A' && b <= 'Z') {
+                b = (unsigned char)(b - 'A' + 'a');
+            }
+            if (a != b) {
+                break;
+            }
+        }
+        if (j == n) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Official updater dropped beside the disc, e.g. ukusonly_patch111v9safedisk.exe. */
+static int
+is_publisher_patch(const char *name)
+{
+    const char *base = name ? basename_of(name) : "";
+
+    return vapor_str_ends_with_ci(base, ".exe") && contains_ci(base, "patch");
+}
+
+static int
 is_junk_exec(const char *base)
 {
     static const char *const junk[] = {
-        "setup.exe", "install.exe", "installer.exe", "unins000.exe",
+        "setup.exe", "install.exe", "installer.exe", "setup.com", "install.com",
+        "unins000.exe",
         "uninstall.exe", "dxsetup.exe", "autorun.exe", "launch.exe",
         "setup_", "instmsi", "vcredist", "vc_redist",
         "unitycrashhandler", "crashreporter", "easyanticheat",
@@ -456,6 +505,11 @@ is_junk_exec(const char *base)
     if (vapor_str_eq_ci(base, "upd.exe")
         || vapor_str_ends_with_ci(base, "up.exe")
         || vapor_str_ends_with_ci(base, "update.exe")) {
+        return 1;
+    }
+    /* A publisher patch dropped next to a disc (ukusonly_patch111....exe)
+     * is installed with the game. It is not the launch target. */
+    if (is_publisher_patch(base)) {
         return 1;
     }
     return 0;
@@ -513,7 +567,13 @@ score_exec(const char *rel, const char *want_slug, int junk_ok)
 static int
 looks_windows_exec(const char *name)
 {
-    return vapor_str_ends_with_ci(name, ".exe");
+    const char *base = name ? basename_of(name) : "";
+
+    if (vapor_dos_name_is_junk(base)) {
+        return 0;
+    }
+    return vapor_str_ends_with_ci(base, ".exe")
+           || vapor_str_ends_with_ci(base, ".com");
 }
 
 static int
@@ -573,7 +633,47 @@ static int
 is_iso_name(const char *name)
 {
     return vapor_str_ends_with_ci(name, ".iso")
-        || vapor_str_ends_with_ci(name, ".img");
+        || vapor_str_ends_with_ci(name, ".img")
+        || vapor_str_ends_with_ci(name, ".bin");
+}
+
+/* .bin is also a Linux binary suffix. Only a file with an ISO 9660
+ * filesystem (plain or raw BIN/CUE sectors) is a disc image. */
+static int
+is_disc_image_file(const char *abs, const char *name)
+{
+    if (vapor_str_ends_with_ci(name, ".iso")
+        || vapor_str_ends_with_ci(name, ".img")) {
+        return 1;
+    }
+    return vapor_str_ends_with_ci(name, ".bin") && abs
+           && vapor_iso_is_image(abs);
+}
+
+static void
+drop_non_image_bins(const char *root, strlist *isos)
+{
+    size_t i = 0;
+
+    while (i < isos->count) {
+        char abs[VAPORD_PATH_MAX];
+
+        if (!vapor_str_ends_with_ci(isos->items[i], ".bin")) {
+            i++;
+            continue;
+        }
+        if (join2(abs, sizeof(abs), root, isos->items[i]) == 0
+            && vapor_iso_is_image(abs)) {
+            i++;
+            continue;
+        }
+        free(isos->items[i]);
+        if (i + 1 < isos->count) {
+            memmove(&isos->items[i], &isos->items[i + 1],
+                    (isos->count - i - 1) * sizeof(isos->items[0]));
+        }
+        isos->count--;
+    }
 }
 
 /* ---------------------------------------------------------------- fingerprint */
@@ -670,14 +770,77 @@ fingerprint_stat(const char *tag, const char *name, uint64_t size, int64_t mtime
     vapor_sha256_hex_buf(line, strlen(line), out);
 }
 
+static void
+fingerprint_patches(const char *root, const char *rel, vapor_sha256 *ctx,
+                    int64_t *max_mtime)
+{
+    char           abs[VAPORD_PATH_MAX];
+    DIR           *d;
+    struct dirent *ent;
+
+    if (rel[0]) {
+        if (join2(abs, sizeof(abs), root, rel) != 0) {
+            return;
+        }
+    } else {
+        snprintf(abs, sizeof(abs), "%s", root);
+    }
+    d = opendir(abs);
+    if (!d) {
+        return;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        char        child_rel[VAPORD_PATH_MAX];
+        char        child_abs[VAPORD_PATH_MAX];
+        struct stat st;
+        char        line[VAPORD_PATH_MAX + 80];
+        int         n;
+
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0
+            || ent->d_name[0] == '.') {
+            continue;
+        }
+        if (rel[0]) {
+            if (join2(child_rel, sizeof(child_rel), rel, ent->d_name) != 0) {
+                continue;
+            }
+        } else {
+            snprintf(child_rel, sizeof(child_rel), "%s", ent->d_name);
+        }
+        if (join2(child_abs, sizeof(child_abs), root, child_rel) != 0
+            || lstat(child_abs, &st) != 0 || S_ISLNK(st.st_mode)) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            fingerprint_patches(root, child_rel, ctx, max_mtime);
+            continue;
+        }
+        if (!S_ISREG(st.st_mode) || !is_publisher_patch(ent->d_name)) {
+            continue;
+        }
+        if (max_mtime && st.st_mtime > *max_mtime) {
+            *max_mtime = (int64_t)st.st_mtime;
+        }
+        n = snprintf(line, sizeof(line), "\npatch|%s|%llu|%lld", child_rel,
+                     (unsigned long long)st.st_size, (long long)st.st_mtime);
+        if (n > 0) {
+            vapor_sha256_update(ctx, line, (size_t)n);
+        }
+    }
+    closedir(d);
+}
+
 static int
 fingerprint_iso_list(const char *root, const strlist *isos,
-                     char out[VAPOR_SHA256_HEX_LEN + 1])
+                     char out[VAPOR_SHA256_HEX_LEN + 1], int64_t *patch_mtime)
 {
     vapor_sha256 ctx;
     uint8_t      digest[VAPOR_SHA256_DIGEST_LEN];
     size_t       i;
 
+    if (patch_mtime) {
+        *patch_mtime = 0;
+    }
     vapor_sha256_init(&ctx);
     vapor_sha256_update(&ctx, "iso-setup1", 10);
     for (i = 0; i < isos->count; i++) {
@@ -696,6 +859,7 @@ fingerprint_iso_list(const char *root, const strlist *isos,
             vapor_sha256_update(&ctx, line, (size_t)n);
         }
     }
+    fingerprint_patches(root, "", &ctx, patch_mtime);
     vapor_sha256_final(&ctx, digest);
     vapor_sha256_hex(digest, out);
     return 0;
@@ -779,6 +943,77 @@ zip_add_dir(packer *p, const char *src_root, const char *rel)
             break;
         }
         p->nfiles++;
+    }
+    closedir(d);
+    return rc;
+}
+
+/* Copy publisher patch exes from the drop folder into the unpacked tree so
+ * they land in the install directory. Disc images stay where they are. */
+static int
+copy_publisher_patches(const char *src_root, const char *rel,
+                       const char *dest_root)
+{
+    char           abs[VAPORD_PATH_MAX];
+    DIR           *d;
+    struct dirent *ent;
+    int            rc = 0;
+
+    if (rel[0]) {
+        if (join2(abs, sizeof(abs), src_root, rel) != 0) {
+            return -1;
+        }
+    } else {
+        snprintf(abs, sizeof(abs), "%s", src_root);
+    }
+    d = opendir(abs);
+    if (!d) {
+        return -1;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        char        child_rel[VAPORD_PATH_MAX];
+        char        child_abs[VAPORD_PATH_MAX];
+        char        dest[VAPORD_PATH_MAX];
+        struct stat st;
+
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0
+            || ent->d_name[0] == '.') {
+            continue;
+        }
+        if (rel[0]) {
+            if (join2(child_rel, sizeof(child_rel), rel, ent->d_name) != 0) {
+                rc = -1;
+                break;
+            }
+        } else {
+            snprintf(child_rel, sizeof(child_rel), "%s", ent->d_name);
+        }
+        if (join2(child_abs, sizeof(child_abs), src_root, child_rel) != 0) {
+            rc = -1;
+            break;
+        }
+        if (lstat(child_abs, &st) != 0 || S_ISLNK(st.st_mode)) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            if (copy_publisher_patches(src_root, child_rel, dest_root) != 0) {
+                rc = -1;
+                break;
+            }
+            continue;
+        }
+        if (!S_ISREG(st.st_mode) || !is_publisher_patch(ent->d_name)) {
+            continue;
+        }
+        if (join2(dest, sizeof(dest), dest_root, ent->d_name) != 0) {
+            rc = -1;
+            break;
+        }
+        VLOG_INFO("discover: including publisher patch \"%s\"", ent->d_name);
+        if (copy_file(child_abs, dest) != 0) {
+            rc = -1;
+            break;
+        }
     }
     closedir(d);
     return rc;
@@ -1299,10 +1534,65 @@ typedef struct {
     char description[VAPOR_DESC_MAX];
     char windows_exec[VAPORD_PATH_MAX];
     char linux_exec[VAPORD_PATH_MAX];
+    char setup_exec[VAPORD_PATH_MAX];
+    char uninstall_exec[VAPORD_PATH_MAX];
     char cover[VAPORD_PATH_MAX];
     char package[VAPORD_PATH_MAX];
+    char runtime[32];
+    char dos_exec[VAPORD_PATH_MAX];
+    char install_mode[32];
+    char **saves;
+    size_t nsaves;
     int  steam_appid;
 } sidecar;
+
+static void
+sidecar_clear_saves(sidecar *s)
+{
+    size_t i;
+
+    if (!s->saves) {
+        s->nsaves = 0;
+        return;
+    }
+    for (i = 0; i < s->nsaves; i++) {
+        free(s->saves[i]);
+    }
+    free(s->saves);
+    s->saves = NULL;
+    s->nsaves = 0;
+}
+
+static int
+runtime_name_ok(const char *s)
+{
+    size_t i;
+
+    if (!s || !s[0] || strlen(s) > 31) {
+        return 0;
+    }
+    for (i = 0; s[i]; i++) {
+        char c = s[i];
+        int  ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                  || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        if (!ok) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int
+dos_exec_ok(const char *s)
+{
+    if (!s || !s[0] || strlen(s) >= VAPORD_PATH_MAX) {
+        return 0;
+    }
+    if (s[0] == '/' || s[0] == '\\' || strstr(s, "..")) {
+        return 0;
+    }
+    return 1;
+}
 
 static const char *
 json_str(const cJSON *obj, const char *a, const char *b)
@@ -1362,11 +1652,93 @@ load_sidecar(const char *dir, sidecar *out)
     if ((s = json_str(root, "linux_exec", "linux-exec"))) {
         snprintf(out->linux_exec, sizeof(out->linux_exec), "%s", s);
     }
+    if ((s = json_str(root, "setup_exec", "setup-exec"))) {
+        snprintf(out->setup_exec, sizeof(out->setup_exec), "%s", s);
+    }
+    if ((s = json_str(root, "uninstall_exec", "uninstall-exec"))) {
+        snprintf(out->uninstall_exec, sizeof(out->uninstall_exec), "%s", s);
+    }
     if ((s = json_str(root, "cover", NULL))) {
         snprintf(out->cover, sizeof(out->cover), "%s", s);
     }
     if ((s = json_str(root, "package", NULL))) {
         snprintf(out->package, sizeof(out->package), "%s", s);
+    }
+    if ((s = json_str(root, "runtime", NULL))) {
+        if (!runtime_name_ok(s)) {
+            VLOG_WARN("discover: %s has an invalid runtime", path);
+            cJSON_Delete(root);
+            sidecar_clear_saves(out);
+            return -1;
+        }
+        snprintf(out->runtime, sizeof(out->runtime), "%s", s);
+    }
+    if ((s = json_str(root, "dos_exec", "dos-exec"))) {
+        if (!dos_exec_ok(s)) {
+            VLOG_WARN("discover: %s dos_exec must be a relative path", path);
+            cJSON_Delete(root);
+            sidecar_clear_saves(out);
+            return -1;
+        }
+        snprintf(out->dos_exec, sizeof(out->dos_exec), "%s", s);
+    }
+    if ((s = json_str(root, "install_mode", "install-mode"))) {
+        if (!vapor_install_mode_is_known(s)) {
+            VLOG_WARN("discover: %s has an unknown install_mode", path);
+            cJSON_Delete(root);
+            sidecar_clear_saves(out);
+            return -1;
+        }
+        snprintf(out->install_mode, sizeof(out->install_mode), "%s", s);
+    }
+    {
+        const cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "saves");
+        const cJSON *it;
+        size_t       n = 0;
+
+        if (arr && !cJSON_IsNull(arr)) {
+            if (!cJSON_IsArray(arr)) {
+                VLOG_WARN("discover: %s saves must be an array", path);
+                cJSON_Delete(root);
+                return -1;
+            }
+            cJSON_ArrayForEach(it, arr) {
+                if (cJSON_IsString(it)) {
+                    n++;
+                }
+            }
+            if (n > VAPOR_SAVE_MAX_PATHS) {
+                VLOG_WARN("discover: %s has too many save paths", path);
+                cJSON_Delete(root);
+                return -1;
+            }
+            if (n > 0) {
+                out->saves = (char **)calloc(n, sizeof(*out->saves));
+                if (!out->saves) {
+                    cJSON_Delete(root);
+                    return -1;
+                }
+                cJSON_ArrayForEach(it, arr) {
+                    if (!cJSON_IsString(it) || !it->valuestring) {
+                        continue;
+                    }
+                    if (!vapor_save_path_is_valid(it->valuestring)) {
+                        VLOG_WARN("discover: %s save path is not allowed: %s",
+                                  path, it->valuestring);
+                        cJSON_Delete(root);
+                        sidecar_clear_saves(out);
+                        return -1;
+                    }
+                    out->saves[out->nsaves] = vapor_strdup(it->valuestring);
+                    if (!out->saves[out->nsaves]) {
+                        cJSON_Delete(root);
+                        sidecar_clear_saves(out);
+                        return -1;
+                    }
+                    out->nsaves++;
+                }
+            }
+        }
     }
     {
         const cJSON *appid = cJSON_GetObjectItemCaseSensitive(root, "steam_appid");
@@ -1426,7 +1798,33 @@ alloc_game_id(vapord *app, const char *folder, const char *wanted, char *out,
 }
 
 static int
-add_target(vapor_manifest *m, const char *platform, const char *exec)
+rel_is_dos(const char *dir, const char *zip, const char *rel)
+{
+    char        full[VAPORD_PATH_MAX];
+    struct stat st;
+
+    if (!rel || !rel[0] || vapor_dos_name_is_junk(rel)) {
+        return 0;
+    }
+    if (vapor_str_ends_with_ci(rel, ".com")) {
+        return 1;
+    }
+    if (!vapor_str_ends_with_ci(rel, ".exe")) {
+        return 0;
+    }
+    if (dir && dir[0] && join2(full, sizeof(full), dir, rel) == 0
+        && stat(full, &st) == 0 && S_ISREG(st.st_mode)) {
+        return vapor_file_is_dos_exe(full);
+    }
+    if (zip && zip[0]) {
+        return vapor_zip_entry_is_dos_exe(zip, rel);
+    }
+    return 0;
+}
+
+static int
+add_target(vapor_manifest *m, const char *platform, const char *exec,
+           const char *runtime)
 {
     vapor_target *grown;
     vapor_target *t;
@@ -1441,6 +1839,12 @@ add_target(vapor_manifest *m, const char *platform, const char *exec)
     t->platform = vapor_strdup(platform);
     t->arch = vapor_strdup("x86_64");
     t->exec = vapor_strdup(exec);
+    if (runtime && runtime[0] && strcmp(runtime, "native") != 0) {
+        t->runtime = vapor_strdup(runtime);
+        if (!t->runtime) {
+            return -1;
+        }
+    }
     if (!t->platform || !t->arch || !t->exec) {
         return -1;
     }
@@ -1610,6 +2014,12 @@ publish_game(vapord *app, const char *folder, const char *abs_dir,
                 goto iso_packaged;
             }
         }
+        if (copy_publisher_patches(abs_dir, "", extract_dir) != 0) {
+            rm_tree(extract_dir);
+            VLOG_WARN("discover: cannot copy publisher patch for \"%s\"",
+                      folder);
+            goto done;
+        }
         unpack_wise_installers(extract_dir);
         vapor_disc_finish_install(extract_dir);
         fold_case_collisions(extract_dir);
@@ -1688,10 +2098,57 @@ publish_game(vapord *app, const char *folder, const char *abs_dir,
     if (!m.id || !m.name || !m.version || !m.package.file || !m.package.format) {
         goto done;
     }
-    if (win_exec && *win_exec && add_target(&m, "windows", win_exec) != 0) {
-        goto done;
+    if (meta && meta->setup_exec[0]) {
+        m.install.setup = vapor_strdup(meta->setup_exec);
+        if (!m.install.setup) {
+            goto done;
+        }
     }
-    if (lin_exec && *lin_exec && add_target(&m, "linux", lin_exec) != 0) {
+    if (meta && meta->uninstall_exec[0]) {
+        m.install.uninstall = vapor_strdup(meta->uninstall_exec);
+        if (!m.install.uninstall) {
+            goto done;
+        }
+    }
+    if (meta && meta->install_mode[0]) {
+        m.install_mode = vapor_strdup(meta->install_mode);
+        if (!m.install_mode) {
+            goto done;
+        }
+    }
+    if (meta && meta->nsaves) {
+        size_t si;
+
+        m.saves = (char **)calloc(meta->nsaves, sizeof(*m.saves));
+        if (!m.saves) {
+            goto done;
+        }
+        for (si = 0; si < meta->nsaves; si++) {
+            m.saves[si] = vapor_strdup(meta->saves[si]);
+            if (!m.saves[si]) {
+                goto done;
+            }
+            m.nsaves++;
+        }
+    }
+    {
+        const char *win_runtime = NULL;
+        int         explicit_native = meta && meta->runtime[0]
+                                      && strcmp(meta->runtime, "native") == 0;
+
+        if (meta && meta->runtime[0] && !explicit_native) {
+            win_runtime = meta->runtime;
+        } else if (!explicit_native && meta && meta->dos_exec[0]) {
+            win_runtime = "dosbox";
+        } else if (!explicit_native
+                   && rel_is_dos(abs_dir, pkg_path, win_exec)) {
+            win_runtime = "dosbox";
+        }
+        if (win_exec && *win_exec && add_target(&m, "windows", win_exec, win_runtime) != 0) {
+            goto done;
+        }
+    }
+    if (lin_exec && *lin_exec && add_target(&m, "linux", lin_exec, NULL) != 0) {
         goto done;
     }
     if (m.ntargets == 0 && !allow_no_target) {
@@ -1798,15 +2255,18 @@ process_folder(vapord *app, const char *folder, int *meta_left)
     if (meta.id[0]) {
         if (!vapor_id_is_valid(meta.id)) {
             VLOG_WARN("discover: vapor.json for \"%s\" has an invalid id", folder);
-            return 0;
+            rc = 0;
+            goto out;
         }
         snprintf(slug, sizeof(slug), "%s", meta.id);
     } else if (vapor_id_slug(name, slug, sizeof(slug)) != 0) {
         VLOG_WARN("discover: cannot derive an id from \"%s\"", folder);
-        return 0;
+        rc = 0;
+        goto out;
     }
     if (alloc_game_id(app, folder, slug, id, sizeof(id)) != 0) {
-        return 0;
+        rc = 0;
+        goto out;
     }
 
     if (meta.package[0]) {
@@ -1814,11 +2274,12 @@ process_folder(vapord *app, const char *folder, int *meta_left)
             || stat(pkg_abs, &st) != 0 || !S_ISREG(st.st_mode)) {
             VLOG_WARN("discover: vapor.json package \"%s\" missing in %s",
                       meta.package, folder);
-            return 0;
+            rc = 0;
+            goto out;
         }
         snprintf(pkg_rel, sizeof(pkg_rel), "%s", meta.package);
         snprintf(pkg_file, sizeof(pkg_file), "%s", basename_of(meta.package));
-        if (is_iso_name(pkg_file)) {
+        if (is_disc_image_file(pkg_abs, pkg_file)) {
             wrap_iso = 1;
             snprintf(format, sizeof(format), "zip");
             snprintf(pkg_file, sizeof(pkg_file), "%s", PACKAGED_ZIP);
@@ -1837,6 +2298,7 @@ process_folder(vapord *app, const char *folder, int *meta_left)
             rc = 0;
             goto out;
         }
+        drop_non_image_bins(abs, &isos);
         strlist_sort(&isos);
         have_exec = (inspect_dir(abs, slug, win_exec, sizeof(win_exec), lin_exec,
                                  sizeof(lin_exec))
@@ -1859,11 +2321,15 @@ process_folder(vapord *app, const char *folder, int *meta_left)
                 rc = 0;
                 goto out;
             }
-        } else if (have_exec) {
+        } else if (have_exec && !is_publisher_patch(win_exec)
+                   && !is_publisher_patch(lin_exec)) {
             kind_dir = 1;
             snprintf(format, sizeof(format), "zip");
             snprintf(pkg_file, sizeof(pkg_file), "%s", PACKAGED_ZIP);
         } else if (isos.count > 0) {
+            /* A patch exe beside the disc is not the game. Unpack the disc
+             * and carry the patch into the install folder. */
+            win_exec[0] = lin_exec[0] = '\0';
             wrap_iso = 1;
             snprintf(pkg_rel, sizeof(pkg_rel), "%s", isos.items[0]);
             snprintf(pkg_file, sizeof(pkg_file), "%s", PACKAGED_ZIP);
@@ -1885,6 +2351,21 @@ process_folder(vapord *app, const char *folder, int *meta_left)
     }
     if (meta.linux_exec[0]) {
         snprintf(lin_exec, sizeof(lin_exec), "%s", meta.linux_exec);
+    }
+    if (meta.dos_exec[0]) {
+        snprintf(win_exec, sizeof(win_exec), "%s", meta.dos_exec);
+    }
+    if (meta.install_mode[0]
+        && (strcmp(meta.install_mode, "portable") == 0
+            || strcmp(meta.install_mode, "keep_disc") == 0)
+        && wrap_iso) {
+        /* Leave disc images in the tree. Unpacking them is unpack_disc. */
+        wrap_iso = 0;
+        kind_dir = 1;
+        pkg_rel[0] = '\0';
+        pkg_abs[0] = '\0';
+        snprintf(format, sizeof(format), "zip");
+        snprintf(pkg_file, sizeof(pkg_file), "%s", PACKAGED_ZIP);
     }
 
     if (meta.cover[0]) {
@@ -1912,9 +2393,13 @@ process_folder(vapord *app, const char *folder, int *meta_left)
         }
     } else if (wrap_iso && isos.count > 0) {
         int64_t max_mtime = 0;
+        int64_t patch_mtime = 0;
         size_t  i;
 
-        fingerprint_iso_list(abs, &isos, fingerprint);
+        fingerprint_iso_list(abs, &isos, fingerprint, &patch_mtime);
+        if (patch_mtime > max_mtime) {
+            max_mtime = patch_mtime;
+        }
         for (i = 0; i < isos.count; i++) {
             char iso_abs[VAPORD_PATH_MAX];
 
@@ -1952,6 +2437,22 @@ process_folder(vapord *app, const char *folder, int *meta_left)
     }
     if (!vapor_version_is_valid(version)) {
         snprintf(version, sizeof(version), "1");
+    }
+    if (meta.runtime[0] || meta.dos_exec[0] || meta.install_mode[0] || meta.nsaves) {
+        vapor_sha256 ctx;
+        uint8_t      dig[VAPOR_SHA256_DIGEST_LEN];
+        size_t       si;
+
+        vapor_sha256_init(&ctx);
+        vapor_sha256_update(&ctx, fingerprint, strlen(fingerprint));
+        vapor_sha256_update(&ctx, meta.runtime, strlen(meta.runtime));
+        vapor_sha256_update(&ctx, meta.dos_exec, strlen(meta.dos_exec));
+        vapor_sha256_update(&ctx, meta.install_mode, strlen(meta.install_mode));
+        for (si = 0; si < meta.nsaves; si++) {
+            vapor_sha256_update(&ctx, meta.saves[si], strlen(meta.saves[si]));
+        }
+        vapor_sha256_final(&ctx, dig);
+        vapor_sha256_hex(dig, fingerprint);
     }
 
     if (vapord_discovered_get(app->db, folder, &prev) == 0
@@ -2006,6 +2507,7 @@ process_folder(vapord *app, const char *folder, int *meta_left)
                       cover_src, fingerprint, wrap_iso || zip_has_iso,
                       wrap_iso ? &isos : NULL);
 out:
+    sidecar_clear_saves(&meta);
     strlist_free(&isos);
     return rc;
 }

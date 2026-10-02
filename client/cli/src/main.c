@@ -28,7 +28,7 @@ usage(void)
     printf("    logout                  discard the session token\n");
     printf("    whoami                  show the signed-in account\n\n");
     printf("  Library\n");
-    printf("    list                    show the server catalog\n");
+    printf("    list                    show the library (catalog and local shortcuts)\n");
     printf("    info GAME               show details for one game\n");
     printf("    installed               show what is installed locally\n\n");
     printf("  Games\n");
@@ -38,15 +38,19 @@ usage(void)
     printf("      --verify-only           download and check, do not extract\n");
     printf("      --keep-download         keep the archive in the cache\n");
     printf("    setup GAME              run a downloaded Windows installer\n");
-    printf("    launch GAME             run an installed game\n");
+    printf("    launch GAME             run an installed game or a local shortcut\n");
     printf("    verify GAME             check an install against its manifest\n");
-    printf("    uninstall GAME          delete an installed game\n\n");
+    printf("    uninstall GAME          delete an installed game\n");
+    printf("    add PATH                add a program already on this computer\n");
+    printf("      --name NAME             library title (default: the file name)\n");
+    printf("                            uninstall only forgets this shortcut\n\n");
     printf("  Configuration\n");
     printf("    config                  print the current settings\n");
     printf("    config server URL       point the client at a server\n");
     printf("    config library PATH     choose where games are installed\n");
     printf("    config pin PIN          pin a self-signed TLS public key\n");
     printf("                            (sha256//BASE64, or \"none\")\n");
+    printf("    config dosbox PATH      DOSBox Staging binary (or \"none\")\n");
     printf("    ping                    check the server is reachable\n\n");
 }
 
@@ -308,8 +312,11 @@ cmd_list(vapor_client *vc)
         fprintf(stderr, "vapor: %s\n", vc->err);
         return 1;
     }
+    if (vc->err[0]) {
+        fprintf(stderr, "vapor: %s\n", vc->err);
+    }
     if (n == 0) {
-        printf("the server catalog is empty\n");
+        printf("the library is empty; install a catalog game or run \"vapor add PATH\"\n");
         free(rows);
         return 0;
     }
@@ -320,7 +327,8 @@ cmd_list(vapor_client *vc)
         printf("%-22s %-10s %10s  %s%s\n", rows[i].id,
                rows[i].latest_version[0] ? rows[i].latest_version : "-", size,
                rows[i].name,
-               rows[i].update_available  ? " [update available]"
+               rows[i].external          ? " [on this computer]"
+               : rows[i].update_available ? " [update available]"
                : rows[i].setup_pending   ? " [needs setup]"
                : rows[i].installed       ? " [installed]"
                                          : "");
@@ -330,11 +338,33 @@ cmd_list(vapor_client *vc)
 }
 
 static int
+cmd_info_external(const vapor_install *rec)
+{
+    printf("%s\n", rec->name[0] ? rec->name : rec->game_id);
+    printf("  id ............. %s\n", rec->game_id);
+    printf("  library ........ on this computer\n");
+    printf("  program ........ %s\n",
+           rec->launch_exe[0] ? rec->launch_exe : rec->install_dir);
+    printf("  managed ........ no; removing it does not delete or uninstall\n");
+    if (rec->play_seconds > 0) {
+        char when[64];
+        vapor_format_duration(rec->play_seconds, when, sizeof(when));
+        printf("  playtime ....... %s\n", when);
+    }
+    return 0;
+}
+
+static int
 cmd_info(vapor_client *vc, const char *game_id)
 {
     vapor_game_detail d;
     vapor_install     rec;
     size_t            i;
+
+    if (vapor_db_get_install(vc, game_id, &rec) == 0
+        && vapor_install_is_external(&rec)) {
+        return cmd_info_external(&rec);
+    }
 
     if (vapor_game_fetch(vc, game_id, &d) != 0) {
         fprintf(stderr, "vapor: %s\n", vc->err);
@@ -410,14 +440,23 @@ cmd_installed(vapor_client *vc)
         return 1;
     }
     if (n == 0) {
-        printf("nothing installed yet; try \"vapor list\" then \"vapor install "
-               "<game>\"\n");
+        printf("nothing installed yet; try \"vapor list\", \"vapor install "
+               "<game>\", or \"vapor add PATH\"\n");
         free(rows);
         return 0;
     }
 
     for (i = 0; i < n; i++) {
         char size[32], played[64];
+
+        if (vapor_install_is_external(&rows[i])) {
+            vapor_format_duration(rows[i].play_seconds, played, sizeof(played));
+            printf("%-22s %-10s %10s  %-28s %s%s%s\n", rows[i].game_id, "local",
+                   "-", rows[i].name, rows[i].launch_exe,
+                   rows[i].play_seconds > 0 ? "  " : "",
+                   rows[i].play_seconds > 0 ? played : "");
+            continue;
+        }
         vapor_format_bytes(rows[i].size_on_disk, size, sizeof(size));
         vapor_format_duration(rows[i].play_seconds, played, sizeof(played));
         printf("%-22s %-10s %10s  %-28s %s\n", rows[i].game_id, rows[i].version,
@@ -573,6 +612,43 @@ cmd_setup(vapor_client *vc, const char *game_id)
 }
 
 static int
+cmd_add(vapor_client *vc, int argc, char **argv)
+{
+    const char *path = NULL;
+    const char *name = NULL;
+    char        id[VAPOR_ID_MAX + 1];
+    int         i;
+
+    for (i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--name") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "vapor: add --name needs a title\n");
+                return 1;
+            }
+            name = argv[++i];
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "vapor: unknown option \"%s\"\n", argv[i]);
+            return 1;
+        } else if (!path) {
+            path = argv[i];
+        } else {
+            fprintf(stderr, "vapor: unexpected argument \"%s\"\n", argv[i]);
+            return 1;
+        }
+    }
+    if (!path) {
+        fprintf(stderr, "vapor: add needs the path to a program\n");
+        return 1;
+    }
+    if (vapor_add_local_game(vc, name, path, id, sizeof(id)) != 0) {
+        fprintf(stderr, "vapor: %s\n", vc->err);
+        return 1;
+    }
+    (void)id;
+    return 0;
+}
+
+static int
 cmd_uninstall(vapor_client *vc, const char *game_id)
 {
     if (vapor_uninstall_game(vc, game_id) != 0) {
@@ -599,9 +675,13 @@ cmd_launch(vapor_client *vc, const char *game_id)
 {
     int exit_code = 0;
 
-    if (vapor_launch_game(vc, game_id, &exit_code) != 0) {
-        fprintf(stderr, "vapor: %s\n", vc->err);
-        return 1;
+    {
+        int src = vapor_launch_game(vc, game_id, &exit_code);
+
+        if (src < 0) {
+            fprintf(stderr, "vapor: %s\n", vc->err);
+            return 1;
+        }
     }
     return 0;
 }
@@ -620,6 +700,8 @@ cmd_config(vapor_client *vc, int argc, char **argv)
         if (vc->cfg.pinned_pubkey[0]) {
             printf("pinned_pubkey .. %s\n", vc->cfg.pinned_pubkey);
         }
+        printf("dosbox_path .... %s\n",
+               vc->cfg.dosbox_path[0] ? vc->cfg.dosbox_path : "(auto)");
         printf("local database . %s\n", vc->db_path);
         return 0;
     }
@@ -677,8 +759,29 @@ cmd_config(vapor_client *vc, int argc, char **argv)
         return 0;
     }
 
+    if (strcmp(argv[0], "dosbox") == 0 && argc == 2) {
+        if (strcmp(argv[1], "none") == 0 || strcmp(argv[1], "off") == 0) {
+            vc->cfg.dosbox_path[0] = '\0';
+        } else if ((size_t)snprintf(vc->cfg.dosbox_path, sizeof(vc->cfg.dosbox_path),
+                                    "%s", argv[1])
+                   >= sizeof(vc->cfg.dosbox_path)) {
+            fprintf(stderr, "vapor: dosbox path is too long\n");
+            return 1;
+        }
+        if (vapor_client_save_config(vc) != 0) {
+            fprintf(stderr, "vapor: %s\n", vc->err);
+            return 1;
+        }
+        if (vc->cfg.dosbox_path[0]) {
+            printf("DOSBox is now %s\n", vc->cfg.dosbox_path);
+        } else {
+            printf("DOSBox path cleared; Play will search PATH and common folders\n");
+        }
+        return 0;
+    }
+
     fprintf(stderr,
-            "vapor: usage: vapor config [server URL | library PATH | pin PIN]\n");
+            "vapor: usage: vapor config [server URL | library PATH | pin PIN | dosbox PATH]\n");
     return 1;
 }
 
@@ -736,6 +839,8 @@ main(int argc, char **argv)
         } else {
             rc = cmd_setup(&vc, argv[2]);
         }
+    } else if (strcmp(cmd, "add") == 0) {
+        rc = cmd_add(&vc, argc - 2, argv + 2);
     } else if (strcmp(cmd, "uninstall") == 0) {
         if (argc < 3) {
             fprintf(stderr, "vapor: uninstall needs a game id\n");

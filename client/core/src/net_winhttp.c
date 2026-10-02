@@ -143,8 +143,16 @@ vapor_net_perform(const vapor_net_req *req, vapor_net_res *res)
                                             : L"Accept: application/json",
                              (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
     if (req->body) {
-        WinHttpAddRequestHeaders(request, L"Content-Type: application/json",
-                                 (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
+        char     ctype[160];
+        wchar_t *wtype;
+        snprintf(ctype, sizeof(ctype), "Content-Type: %s",
+                 req->content_type ? req->content_type : "application/json");
+        wtype = widen(ctype);
+        if (wtype) {
+            WinHttpAddRequestHeaders(request, wtype, (DWORD)-1,
+                                     WINHTTP_ADDREQ_FLAG_ADD);
+            free(wtype);
+        }
     }
     if (req->bearer) {
         char     hdr[128];
@@ -195,8 +203,8 @@ vapor_net_perform(const vapor_net_req *req, vapor_net_res *res)
     if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                             req->body ? (LPVOID)req->body
                                       : WINHTTP_NO_REQUEST_DATA,
-                            req->body ? (DWORD)strlen(req->body) : 0,
-                            req->body ? (DWORD)strlen(req->body) : 0, 0)) {
+                            req->body ? (DWORD)req->body_len : 0,
+                            req->body ? (DWORD)req->body_len : 0, 0)) {
         fail(res, "cannot reach server");
         goto cleanup;
     }

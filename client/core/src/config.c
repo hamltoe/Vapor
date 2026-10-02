@@ -138,6 +138,8 @@ load_config_file(vapor_client *vc)
             strip_trailing_slash(vc->cfg.library_dir);
         } else if (strcmp(key, "pinned_pubkey") == 0) {
             snprintf(vc->cfg.pinned_pubkey, sizeof(vc->cfg.pinned_pubkey), "%s", val);
+        } else if (strcmp(key, "dosbox_path") == 0) {
+            snprintf(vc->cfg.dosbox_path, sizeof(vc->cfg.dosbox_path), "%s", val);
         }
     }
     fclose(f);
@@ -182,6 +184,9 @@ vapor_client_save_config(vapor_client *vc)
     if (vc->cfg.pinned_pubkey[0]) {
         fprintf(f, "pinned_pubkey = %s\n", vc->cfg.pinned_pubkey);
     }
+    if (vc->cfg.dosbox_path[0]) {
+        fprintf(f, "dosbox_path = %s\n", vc->cfg.dosbox_path);
+    }
     fclose(f);
 
     remove(vc->config_path);
@@ -214,7 +219,16 @@ static const char LOCAL_SCHEMA[] =
     "  play_seconds   INTEGER NOT NULL DEFAULT 0,"
     "  size_on_disk   INTEGER NOT NULL DEFAULT 0,"
     "  setup_pending  INTEGER NOT NULL DEFAULT 0,"
-    "  payload_dir    TEXT NOT NULL DEFAULT ''"
+    "  payload_dir    TEXT NOT NULL DEFAULT '',"
+    "  install_kind   TEXT NOT NULL DEFAULT '',"
+    "  uninstall_exe  TEXT NOT NULL DEFAULT '',"
+    "  uninstall_params TEXT NOT NULL DEFAULT '',"
+    "  product_dir    TEXT NOT NULL DEFAULT '',"
+    "  launch_exe     TEXT NOT NULL DEFAULT '',"
+    "  setup_state    TEXT NOT NULL DEFAULT '',"
+    "  setup_rel      TEXT NOT NULL DEFAULT '',"
+    "  profile_launch TEXT NOT NULL DEFAULT '',"
+    "  profile_uninstall TEXT NOT NULL DEFAULT ''"
     ");"
     "CREATE TABLE IF NOT EXISTS sessions ("
     "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -305,6 +319,33 @@ vapor_client_open(vapor_client *vc)
                  NULL, NULL, NULL);
     sqlite3_exec(vc->db,
                  "ALTER TABLE installs ADD COLUMN payload_dir TEXT NOT NULL DEFAULT '';",
+                 NULL, NULL, NULL);
+    sqlite3_exec(vc->db,
+                 "ALTER TABLE installs ADD COLUMN install_kind TEXT NOT NULL DEFAULT '';",
+                 NULL, NULL, NULL);
+    sqlite3_exec(vc->db,
+                 "ALTER TABLE installs ADD COLUMN uninstall_exe TEXT NOT NULL DEFAULT '';",
+                 NULL, NULL, NULL);
+    sqlite3_exec(vc->db,
+                 "ALTER TABLE installs ADD COLUMN uninstall_params TEXT NOT NULL DEFAULT '';",
+                 NULL, NULL, NULL);
+    sqlite3_exec(vc->db,
+                 "ALTER TABLE installs ADD COLUMN product_dir TEXT NOT NULL DEFAULT '';",
+                 NULL, NULL, NULL);
+    sqlite3_exec(vc->db,
+                 "ALTER TABLE installs ADD COLUMN launch_exe TEXT NOT NULL DEFAULT '';",
+                 NULL, NULL, NULL);
+    sqlite3_exec(vc->db,
+                 "ALTER TABLE installs ADD COLUMN setup_state TEXT NOT NULL DEFAULT '';",
+                 NULL, NULL, NULL);
+    sqlite3_exec(vc->db,
+                 "ALTER TABLE installs ADD COLUMN setup_rel TEXT NOT NULL DEFAULT '';",
+                 NULL, NULL, NULL);
+    sqlite3_exec(vc->db,
+                 "ALTER TABLE installs ADD COLUMN profile_launch TEXT NOT NULL DEFAULT '';",
+                 NULL, NULL, NULL);
+    sqlite3_exec(vc->db,
+                 "ALTER TABLE installs ADD COLUMN profile_uninstall TEXT NOT NULL DEFAULT '';",
                  NULL, NULL, NULL);
     return 0;
 }

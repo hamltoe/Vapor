@@ -100,8 +100,8 @@ Override with `VAPOR_DATA_DIR` for tests or portable installs.
 Inside that directory:
 
 ```
-config.ini          server URL, session token, library path, optional TLS pin
-library.db          installed games and playtime (not accounts)
+config.ini          server URL, session token, library path, optional TLS pin, optional dosbox_path
+library.db          installed games, local shortcuts, and playtime (not accounts)
 covers/<id>-<ver>.cover
 ```
 
@@ -116,7 +116,11 @@ Defaults in `deploy/vapord.conf`:
 library_root = /srv/vapor/library
 content_root = /srv/vapor/content
 db_path      = /var/lib/vapor/vapor.db
+saves_root   = /var/lib/vapor/saves    # default: beside the database
 ```
+
+`saves_root/<user_id>/<game_id>/save.zip` is that user's save archive
+for one game. It is not part of the shared package under `content_root`.
 
 `library_root` is the drop folder vapord scans. Each immediate
 subdirectory is one game. Discovery runs at startup and then every
@@ -124,11 +128,11 @@ subdirectory is one game. Discovery runs at startup and then every
 folders are fingerprint-skipped so large archives are not re-hashed.
 
 Zip files already sitting in `library_root` are served in place.
-ISO files are unpacked (ISO 9660 / Joliet); every image in the folder is
-merged into one tree. A Wise `SETUP.EXE` on the disc
-is unpacked too, and the files are zipped into
-`<content_root>/<game_id>/<version>/package.zip`; the original disc images
-are left in the drop folder. Folders of loose files are zipped into the
+ISO and BIN/CUE files are unpacked (ISO 9660 / Joliet, including raw
+2352-byte sectors); every image in the folder is merged into one tree.
+A Wise `SETUP.EXE` on the disc is unpacked too, and the files are zipped
+into `<content_root>/<game_id>/<version>/package.zip`; the original disc
+images are left in the drop folder. Folders of loose files are zipped into the
 same content path. Disc leftovers are stripped by heuristic: autorun
 files and `launch.exe`, and a tiny root `*.DAT` only when a larger namesake exists below.
 Updaters (`upd.exe`, `*up.exe`, `*update.exe`) are not chosen as the

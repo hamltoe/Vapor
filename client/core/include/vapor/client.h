@@ -20,6 +20,9 @@ typedef struct {
     /* Base64 "sha256//..." public-key pin, for a server using a self-signed
      * certificate instead of a CA-issued one. Empty means normal CA checks. */
     char    pinned_pubkey[256];
+    /* Optional DOSBox Staging (or compatible) binary. Empty means PATH and
+     * the usual Windows install folders. */
+    char    dosbox_path[VAPOR_PATH_MAX];
 } vapor_client_config;
 
 typedef struct {
@@ -67,6 +70,10 @@ int vapor_api_post(vapor_client *vc, const char *path, const char *json_body,
                    int auth, vapor_response *out);
 int vapor_api_put(vapor_client *vc, const char *path, const char *json_body,
                   int auth, vapor_response *out);
+
+/* PUT a binary body. Returns 0 when a response was received (check status). */
+int vapor_http_put_bytes(vapor_client *vc, const char *path, const void *body,
+                         size_t len, int auth, vapor_response *out);
 
 /* Return non-zero to abort. `done`/`total` are an overall work fraction for
  * install (download through setup), not download bytes alone. */
@@ -131,6 +138,9 @@ typedef struct {
     double   rating_avg;       /* local community average, 0 if no votes */
     int      rating_votes;
     int      my_rating;        /* 1-5, or 0 if this account has not rated */
+    /* Shortcut to a program that was already on this computer. It is not a
+     * Vapor install: Play only starts it, and Remove only forgets the shortcut. */
+    int      external;
     int      steam_rating_pct; /* 0 if unknown */
     int      steam_rating_count;
     char     steam_rating_label[48];
@@ -166,6 +176,25 @@ typedef struct {
 int vapor_game_rate(vapor_client *vc, const char *game_id, int score,
                     vapor_rating *out);
 
+/* How the title landed on disk. Remove follows this instead of guessing. */
+#define VAPOR_INSTALL_KIND_PORTABLE   "portable"
+#define VAPOR_INSTALL_KIND_OS_PRODUCT "os_product"
+#define VAPOR_INSTALL_KIND_RUNTIME    "runtime"
+/* A program the user already had (another store, a manual copy). Vapor stores
+ * the path and launches it. Remove forgets that row and does not delete files
+ * or run an uninstaller. */
+#define VAPOR_INSTALL_KIND_EXTERNAL   "external"
+#define VAPOR_INSTALL_KIND_MAX        16
+
+/* Tracked Windows setup. setup_pending stays 1 for every state except
+ * "completed" (and an empty state, which means no installer ran). */
+#define VAPOR_SETUP_PENDING   "pending"
+#define VAPOR_SETUP_RUNNING   "running"
+#define VAPOR_SETUP_COMPLETED "completed"
+#define VAPOR_SETUP_CANCELLED "cancelled"
+#define VAPOR_SETUP_FAILED    "failed"
+#define VAPOR_SETUP_STATE_MAX 16
+
 /* ---------------------------------------------------------------- local db */
 typedef struct {
     char    game_id[VAPOR_ID_MAX + 1];
@@ -177,8 +206,22 @@ typedef struct {
     int64_t play_seconds;
     uint64_t size_on_disk;
     int      setup_pending; /* 1 until a Windows installer has been run and tracked */
+    char     setup_state[VAPOR_SETUP_STATE_MAX];
     char     payload_dir[VAPOR_PATH_MAX]; /* downloaded kit; empty means install_dir */
+    char     install_kind[VAPOR_INSTALL_KIND_MAX];
+    char     uninstall_exe[VAPOR_PATH_MAX];
+    char     uninstall_params[2048];
+    char     product_dir[VAPOR_PATH_MAX]; /* ARP InstallLocation / play dir */
+    /* Absolute path of the program for an external shortcut. Empty otherwise. */
+    char     launch_exe[VAPOR_PATH_MAX];
+    /* Relative paths chosen for this game (manifest profile, else heuristics). */
+    char     setup_rel[VAPOR_PATH_MAX];
+    char     profile_launch[VAPOR_PATH_MAX];
+    char     profile_uninstall[VAPOR_PATH_MAX];
 } vapor_install;
+
+/* Non-zero when `rec` is a local shortcut rather than a game Vapor installed. */
+int vapor_install_is_external(const vapor_install *rec);
 
 int vapor_db_record_install(vapor_client *vc, const vapor_install *rec);
 int vapor_db_forget_install(vapor_client *vc, const char *game_id);
@@ -188,6 +231,9 @@ int vapor_db_get_install(vapor_client *vc, const char *game_id,
 int vapor_db_list_installs(vapor_client *vc, vapor_install **out, size_t *count);
 int vapor_db_add_playtime(vapor_client *vc, const char *game_id,
                           int64_t started_at, int64_t seconds);
+/* Moves an install row and its play sessions to a new id. */
+int vapor_db_rename_install(vapor_client *vc, const char *from_id,
+                            const char *to_id);
 
 /* ----------------------------------------------------------------- install */
 typedef struct {
@@ -204,18 +250,40 @@ typedef struct {
 int vapor_install_game(vapor_client *vc, const char *game_id,
                        const char *version, const vapor_install_opts *opts,
                        vapor_progress_fn cb, void *ud);
-/* Removes a game the way it was installed. A Windows product match runs
- * that entry's uninstaller (or unins000.exe / uninstall.exe in the install
- * folder) before the recorded folders are deleted. */
+/* Removes a game the way it was installed. `os_product` runs the profile
+ * uninstaller or the recorded vendor command (or rediscovers it by
+ * InstallLocation, then DisplayName, then unins000.exe / uninstall.exe).
+ * `portable` and `runtime` only delete the recorded folders; shared
+ * `{data_dir}/runtimes` is left alone. `external` only forgets the shortcut.
+ * Cancelling the uninstaller leaves the game installed. */
 int vapor_uninstall_game(vapor_client *vc, const char *game_id);
+/* Same as vapor_uninstall_game. `cb` returning non-zero cancels the wait. */
+int vapor_uninstall_game_cancellable(vapor_client *vc, const char *game_id,
+                                     vapor_progress_fn cb, void *ud);
+
+/* Records a program that is already installed somewhere else on this computer.
+ * `name` may be NULL; the file name is used then. `exe_path` must be an
+ * existing file, not a directory. Nothing is copied. Adding the same path
+ * again updates the title and keeps playtime. On success the library id is
+ * written to `out_id` when that buffer is non-NULL. */
+int vapor_add_local_game(vapor_client *vc, const char *name, const char *exe_path,
+                         char *out_id, size_t idsz);
+/* `local-<slug>` or, when `suffix` is greater than 1, `local-<slug>-N`. */
+int vapor_local_shortcut_id(const char *name, int suffix, char *out, size_t outsz);
+/* Native file picker for a program. 0 if `out` was filled, 1 if the user
+ * cancelled, -1 if this system has no picker (type the path instead). */
+int vapor_pick_executable(char *out, size_t outsz);
 
 /* Run a Windows installer that was downloaded into the payload directory,
  * then record where it placed the game. 0 if the title is playable, 1 if the
- * installer did not finish (setup still pending; vc->err explains), -1 on
- * error. Completion is the destination tree (requested silent folder, or the
- * Uninstall / Program Files path the installer created), not the process
- * exit code alone. */
+ * installer was cancelled or did not finish (setup still pending; vc->err
+ * explains), -1 if the installer could not be started. Completion is the
+ * destination tree (requested silent folder, or the Uninstall / Program Files
+ * path the installer created), not the process exit code alone. */
 int vapor_setup_game(vapor_client *vc, const char *game_id);
+/* Same as vapor_setup_game. `cb` returning non-zero cancels the wait. */
+int vapor_setup_game_tracked(vapor_client *vc, const char *game_id,
+                             vapor_progress_fn cb, void *ud);
 
 /* Fetch and parse a manifest without installing. Caller frees via
  * vapor_manifest_free. */
@@ -235,7 +303,19 @@ int vapor_verify_install(vapor_client *vc, const char *game_id);
 /* Runs the game and blocks until it exits. *out_exit gets the process exit
  * code. Playtime is recorded automatically. Copy-protected disc wrappers
  * (SafeDisc/SECDRV) are not spawned; a patched or source-port exe is used
- * when one is present. */
+ * when one is present. An external shortcut starts the recorded program and
+ * does not read a manifest or touch that program's files. A shortcut whose
+ * program lives in a Steam library is handed to the Steam client instead of
+ * spawned directly (Steam's own check rejects that). Returns 1 in that case
+ * and does not wait; 0 after a waited-on process; -1 on error. */
 int vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit);
+
+/* Pull account saves before Play, and push them after the process exits.
+ * 0 when there is nothing to do or the sync succeeded. -1 aborts Play on the
+ * way in, or reports a failed upload on the way out. */
+int vapor_saves_before_play(vapor_client *vc, const vapor_manifest *m,
+                            const char *install_dir);
+int vapor_saves_after_play(vapor_client *vc, const vapor_manifest *m,
+                           const char *install_dir);
 
 #endif /* VAPOR_CLIENT_H */

@@ -359,13 +359,15 @@ vapor_plat_run(const char *exec, char *const argv[], const char *cwd,
 
 int
 vapor_plat_run_ui(const char *exec, const char *cwd, const char *params,
-                  int *out_exit)
+                  int *out_exit, vapor_plat_cancel_fn cancel, void *ud)
 {
     char *argv[2];
 
     argv[0] = (char *)exec;
     argv[1] = NULL;
     (void)params;
+    (void)cancel;
+    (void)ud;
     return vapor_plat_run(exec, argv, cwd, NULL, 0, out_exit);
 }
 
@@ -459,6 +461,209 @@ vapor_plat_missing_dlls(const char *exe, char *out, size_t outsz)
         out[0] = '\0';
     }
     return 0;
+}
+
+int
+vapor_plat_absolute(const char *path, char *out, size_t outsz)
+{
+    char *resolved;
+    int   rc = -1;
+
+    if (!path || !path[0] || !out || outsz == 0) {
+        return -1;
+    }
+    resolved = realpath(path, NULL);
+    if (!resolved) {
+        out[0] = '\0';
+        return -1;
+    }
+    if ((size_t)snprintf(out, outsz, "%s", resolved) < outsz) {
+        rc = 0;
+    } else {
+        out[0] = '\0';
+    }
+    free(resolved);
+    return rc;
+}
+
+/* zenity and kdialog are optional. A missing tool exits 127; cancel exits 1
+ * with no path. */
+static int
+pick_command(const char *cmd, char *out, size_t outsz, int *missing)
+{
+    FILE  *p;
+    int    st;
+    size_t n;
+
+    *missing = 0;
+    out[0] = '\0';
+    p = popen(cmd, "r");
+    if (!p) {
+        *missing = 1;
+        return -1;
+    }
+    if (!fgets(out, (int)outsz, p)) {
+        out[0] = '\0';
+    } else {
+        n = strlen(out);
+        if (n + 1 >= outsz && (n == 0 || out[n - 1] != '\n')) {
+            pclose(p);
+            out[0] = '\0';
+            return -1;
+        }
+        while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r')) {
+            out[--n] = '\0';
+        }
+    }
+    st = pclose(p);
+    if (out[0]) {
+        return 0;
+    }
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 127) {
+        *missing = 1;
+    }
+    return 1;
+}
+
+int
+vapor_plat_pick_file(char *out, size_t outsz)
+{
+    int missing = 0;
+    int rc;
+
+    if (!out || outsz < 2) {
+        return -1;
+    }
+    rc = pick_command(
+        "zenity --file-selection --title=\"Choose a game to launch\" 2>/dev/null",
+        out, outsz, &missing);
+    if (rc == 0) {
+        return 0;
+    }
+    if (rc < 0 || !missing) {
+        return rc < 0 ? -1 : 1;
+    }
+    rc = pick_command("kdialog --getopenfilename . 2>/dev/null", out, outsz,
+                      &missing);
+    if (rc == 0) {
+        return 0;
+    }
+    if (rc < 0 || !missing) {
+        return rc < 0 ? -1 : 1;
+    }
+    out[0] = '\0';
+    return -1;
+}
+
+int
+vapor_plat_list_dir(const char *dir, vapor_plat_dir_fn fn, void *ud)
+{
+    DIR           *d;
+    struct dirent *ent;
+    int            rc = 0;
+
+    if (!dir || !dir[0] || !fn) {
+        return -1;
+    }
+    d = opendir(dir);
+    if (!d) {
+        return -1;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        rc = fn(ent->d_name, ud);
+        if (rc != 0) {
+            break;
+        }
+    }
+    closedir(d);
+    return rc;
+}
+
+static int
+spawn_detached(char *const argv[])
+{
+    pid_t pid;
+    int   status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        pid_t inner = fork();
+
+        if (inner < 0) {
+            _exit(127);
+        }
+        if (inner == 0) {
+            execvp(argv[0], argv);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (waitpid(pid, &status, 0) < 0) {
+        return -1;
+    }
+    return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+}
+
+int
+vapor_plat_start(const char *exe, const char *params)
+{
+    char  buf[512];
+    char *argv[8];
+    int   n = 0;
+
+    if (!exe || !exe[0]) {
+        return -1;
+    }
+    argv[n++] = (char *)exe;
+    if (params && params[0]) {
+        char *p;
+
+        if ((size_t)snprintf(buf, sizeof(buf), "%s", params) >= sizeof(buf)) {
+            return -1;
+        }
+        p = buf;
+        while (*p && n < 7) {
+            while (*p == ' ') {
+                p++;
+            }
+            if (!*p) {
+                break;
+            }
+            argv[n++] = p;
+            while (*p && *p != ' ') {
+                p++;
+            }
+            if (*p) {
+                *p++ = '\0';
+            }
+        }
+    }
+    argv[n] = NULL;
+    return spawn_detached(argv);
+}
+
+int
+vapor_plat_open_url(const char *url)
+{
+    char *argv[4];
+
+    if (!url || !url[0]) {
+        return -1;
+    }
+    argv[0] = "xdg-open";
+    argv[1] = (char *)url;
+    argv[2] = NULL;
+    if (spawn_detached(argv) == 0) {
+        return 0;
+    }
+    argv[0] = "steam";
+    return spawn_detached(argv);
 }
 
 #endif /* !_WIN32 */

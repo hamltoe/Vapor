@@ -24,6 +24,14 @@ vapor_inst_kind vapor_inst_detect(const char *exec, const char *cwd);
 int vapor_inst_silent_params(vapor_inst_kind kind, const char *exec,
                              const char *dest, char *out, size_t outsz);
 
+/* Write arguments that remove an install. 0 if `out` is filled, 1 if this
+ * family must not be driven from this executable (InstallShield, or an
+ * Inno/NSIS setup.exe that would reinstall), -1 if `out` is too small.
+ * MSI uses `msiexec /x`. Inno and NSIS only get quiet flags when `exec` is
+ * already an uninstaller (`unins*.exe` / `uninstall.exe`). */
+int vapor_inst_uninstall_params(vapor_inst_kind kind, const char *exec,
+                                char *out, size_t outsz);
+
 /* 1 if this PE uses disc copy-protection Windows 10+ cannot load
  * (SafeDisc `BoG_` cookie, or SECDRV.SYS sitting next to the exe). */
 int vapor_exe_is_copy_protected(const char *path);

@@ -34,7 +34,10 @@ entry_from_json(vapor_client *vc, const cJSON *g, vapor_catalog_entry *e)
     vapor_json_copy(e->steam_rating_label, sizeof(e->steam_rating_label), g,
                     "steam_rating_label", "");
 
-    if (e->id[0] && vapor_db_get_install(vc, e->id, &rec) == 0) {
+    /* An external shortcut can share an id shape with a catalog row only after
+     * a collision rename failed. Do not treat the server game as that shortcut. */
+    if (e->id[0] && vapor_db_get_install(vc, e->id, &rec) == 0
+        && !vapor_install_is_external(&rec)) {
         e->installed = 1;
         snprintf(e->installed_version, sizeof(e->installed_version), "%s",
                  rec.version);
@@ -66,6 +69,12 @@ entry_from_json(vapor_client *vc, const cJSON *g, vapor_catalog_entry *e)
                     || vapor_str_has_prefix(base, "setup_")
                     || vapor_str_has_prefix(base, "instmsi")) {
                     rec.setup_pending = 1;
+                    snprintf(rec.setup_state, sizeof(rec.setup_state), "%s",
+                             VAPOR_SETUP_PENDING);
+                    if (!rec.install_kind[0]) {
+                        snprintf(rec.install_kind, sizeof(rec.install_kind),
+                                 "%s", VAPOR_INSTALL_KIND_OS_PRODUCT);
+                    }
                     if (vapor_db_record_install(vc, &rec) == 0) {
                         e->setup_pending = 1;
                     }
@@ -76,55 +85,181 @@ entry_from_json(vapor_client *vc, const cJSON *g, vapor_catalog_entry *e)
     }
 }
 
+static int
+catalog_grow(vapor_catalog_entry **rows, size_t *cap, size_t n)
+{
+    size_t               ncap;
+    vapor_catalog_entry *grown;
+
+    if (n < *cap) {
+        return 0;
+    }
+    ncap = *cap ? *cap * 2 : 16;
+    grown = (vapor_catalog_entry *)realloc(*rows, ncap * sizeof(*grown));
+    if (!grown) {
+        return -1;
+    }
+    *rows = grown;
+    *cap = ncap;
+    return 0;
+}
+
+static int
+catalog_has_id(const vapor_catalog_entry *rows, size_t n, const char *id)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        if (strcmp(rows[i].id, id) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void
+entry_from_external(const vapor_install *rec, vapor_catalog_entry *e)
+{
+    memset(e, 0, sizeof(*e));
+    snprintf(e->id, sizeof(e->id), "%s", rec->game_id);
+    snprintf(e->name, sizeof(e->name), "%s",
+             rec->name[0] ? rec->name : rec->game_id);
+    snprintf(e->developer, sizeof(e->developer), "On this computer");
+    snprintf(e->description, sizeof(e->description), "%s",
+             rec->launch_exe[0] ? rec->launch_exe : rec->install_dir);
+    e->installed = 1;
+    e->external = 1;
+    e->play_seconds = rec->play_seconds;
+}
+
+/* Local shortcuts are not in the server catalog. If a server id collides with
+ * one, rename the shortcut so both can sit in the library. */
+static int
+append_external_shortcuts(vapor_client *vc, vapor_catalog_entry **rows,
+                          size_t *n, size_t *cap)
+{
+    vapor_install *all = NULL;
+    size_t         ni = 0, i;
+
+    if (vapor_db_list_installs(vc, &all, &ni) != 0) {
+        return -1;
+    }
+    for (i = 0; i < ni; i++) {
+        vapor_install rec = all[i];
+
+        if (!vapor_install_is_external(&rec)) {
+            continue;
+        }
+        if (catalog_has_id(*rows, *n, rec.game_id)) {
+            char alt[VAPOR_ID_MAX + 1];
+            int  s, renamed = 0;
+
+            for (s = 2; s < 100; s++) {
+                vapor_install tmp;
+                int           got;
+
+                if (vapor_local_shortcut_id(rec.name[0] ? rec.name : "game", s,
+                                            alt, sizeof(alt))
+                    != 0) {
+                    continue;
+                }
+                if (catalog_has_id(*rows, *n, alt)) {
+                    continue;
+                }
+                got = vapor_db_get_install(vc, alt, &tmp);
+                if (got < 0) {
+                    free(all);
+                    return -1;
+                }
+                if (got == 0) {
+                    continue;
+                }
+                if (vapor_db_rename_install(vc, rec.game_id, alt) != 0) {
+                    break;
+                }
+                snprintf(rec.game_id, sizeof(rec.game_id), "%s", alt);
+                renamed = 1;
+                break;
+            }
+            if (!renamed) {
+                continue;
+            }
+        }
+        if (catalog_grow(rows, cap, *n) != 0) {
+            vapor_client_set_error(vc, "out of memory");
+            free(all);
+            return -1;
+        }
+        entry_from_external(&rec, &(*rows)[*n]);
+        (*n)++;
+    }
+    free(all);
+    return 0;
+}
+
 int
 vapor_catalog_fetch(vapor_client *vc, vapor_catalog_entry **out, size_t *count)
 {
     vapor_response       r;
-    cJSON               *body, *games, *g;
+    cJSON               *body = NULL, *games, *g;
     vapor_catalog_entry *rows = NULL;
     size_t               n = 0, cap = 0;
+    int                  server_ok = 0;
+    char                 server_err[1024];
 
     *out = NULL;
     *count = 0;
+    vc->err[0] = '\0';
+    server_err[0] = '\0';
 
     if (vapor_api_get(vc, VAPOR_EP_GAMES, 1, &r) != 0) {
+        snprintf(server_err, sizeof(server_err), "%s",
+                 vc->err[0] ? vc->err : "cannot reach the server");
         vapor_response_free(&r);
-        return -1;
-    }
-    body = vapor_json_parse_response(&r);
-    vapor_response_free(&r);
-    if (!body) {
-        vapor_client_set_error(vc, "could not read the catalog");
-        return -1;
-    }
-
-    games = cJSON_GetObjectItemCaseSensitive(body, "games");
-    if (!cJSON_IsArray(games)) {
-        vapor_client_set_error(vc, "the catalog response has no games array");
-        cJSON_Delete(body);
-        return -1;
-    }
-
-    cJSON_ArrayForEach(g, games) {
-        if (n == cap) {
-            size_t               ncap = cap ? cap * 2 : 16;
-            vapor_catalog_entry *grown;
-
-            grown = (vapor_catalog_entry *)realloc(rows, ncap * sizeof(*grown));
-            if (!grown) {
-                vapor_client_set_error(vc, "out of memory");
-                free(rows);
-                cJSON_Delete(body);
-                return -1;
+    } else {
+        body = vapor_json_parse_response(&r);
+        vapor_response_free(&r);
+        if (!body) {
+            snprintf(server_err, sizeof(server_err), "could not read the catalog");
+        } else {
+            games = cJSON_GetObjectItemCaseSensitive(body, "games");
+            if (!cJSON_IsArray(games)) {
+                snprintf(server_err, sizeof(server_err),
+                         "the catalog response has no games array");
+            } else {
+                server_ok = 1;
+                cJSON_ArrayForEach(g, games) {
+                    if (catalog_grow(&rows, &cap, n) != 0) {
+                        vapor_client_set_error(vc, "out of memory");
+                        free(rows);
+                        cJSON_Delete(body);
+                        return -1;
+                    }
+                    entry_from_json(vc, g, &rows[n]);
+                    n++;
+                }
             }
-            rows = grown;
-            cap = ncap;
+            cJSON_Delete(body);
+            body = NULL;
         }
-        entry_from_json(vc, g, &rows[n]);
-        n++;
     }
 
-    cJSON_Delete(body);
+    if (append_external_shortcuts(vc, &rows, &n, &cap) != 0) {
+        free(rows);
+        return -1;
+    }
+    if (!server_ok && n == 0) {
+        vapor_client_set_error(vc, "%s",
+                               server_err[0] ? server_err : "cannot reach the server");
+        free(rows);
+        return -1;
+    }
+    if (!server_ok) {
+        vapor_client_set_error(
+            vc, "server catalog is unavailable; showing games on this computer");
+    } else {
+        vc->err[0] = '\0';
+    }
     *out = rows;
     *count = n;
     return 0;

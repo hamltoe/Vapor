@@ -65,6 +65,15 @@ static const char *const MIGRATIONS[] = {
     "ALTER TABLE games ADD COLUMN steam_rating_count INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE games ADD COLUMN steam_rating_label TEXT",
     "ALTER TABLE games ADD COLUMN metadata_fetched_at INTEGER NOT NULL DEFAULT 0",
+    "CREATE TABLE IF NOT EXISTS saves ("
+    "  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"
+    "  game_id    TEXT NOT NULL,"
+    "  revision   INTEGER NOT NULL,"
+    "  sha256     TEXT NOT NULL,"
+    "  size       INTEGER NOT NULL,"
+    "  updated_at INTEGER NOT NULL,"
+    "  PRIMARY KEY (user_id, game_id)"
+    ")",
     "CREATE TABLE IF NOT EXISTS ratings ("
     "  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,"
     "  game_id    TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,"
@@ -1216,4 +1225,71 @@ vapord_game_json(sqlite3 *db, const char *game_id, int64_t user_id)
         sqlite3_finalize(st);
     }
     return root;
+}
+
+int
+vapord_save_get(sqlite3 *db, int64_t user_id, const char *game_id,
+                int64_t *revision, char *sha, size_t shasz, int64_t *size,
+                int64_t *updated_at)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (sqlite3_prepare_v2(db,
+                           "SELECT revision, sha256, size, updated_at FROM saves"
+                           " WHERE user_id = ? AND game_id = ?",
+                           -1, &st, NULL) != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_int64(st, 1, user_id);
+    sqlite3_bind_text(st, 2, game_id, -1, SQLITE_STATIC);
+    rc = sqlite3_step(st);
+    if (rc == SQLITE_ROW) {
+        const char *stored = (const char *)sqlite3_column_text(st, 1);
+        if (revision) {
+            *revision = sqlite3_column_int64(st, 0);
+        }
+        if (sha && shasz) {
+            snprintf(sha, shasz, "%s", stored ? stored : "");
+        }
+        if (size) {
+            *size = sqlite3_column_int64(st, 2);
+        }
+        if (updated_at) {
+            *updated_at = sqlite3_column_int64(st, 3);
+        }
+        sqlite3_finalize(st);
+        return 0;
+    }
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 1 : -1;
+}
+
+int
+vapord_save_store(sqlite3 *db, int64_t user_id, const char *game_id,
+                  int64_t revision, const char *sha, int64_t size)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    rc = sqlite3_prepare_v2(
+        db,
+        "INSERT INTO saves (user_id, game_id, revision, sha256, size, updated_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(user_id, game_id) DO UPDATE SET"
+        " revision = excluded.revision, sha256 = excluded.sha256,"
+        " size = excluded.size, updated_at = excluded.updated_at",
+        -1, &st, NULL);
+    if (rc != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_int64(st, 1, user_id);
+    sqlite3_bind_text(st, 2, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 3, revision);
+    sqlite3_bind_text(st, 4, sha, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 5, size);
+    sqlite3_bind_int64(st, 6, vapor_now_unix());
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
 }

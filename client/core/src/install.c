@@ -15,20 +15,24 @@
 #include <windows.h>
 #endif
 
-#include "miniz.h"
+#include "cJSON.h"
 #include "installer.h"
+#include "json.h"
+#include "miniz.h"
 #include "net.h"
 #include "platform.h"
 #include "vapor/buf.h"
 #include "vapor/iso9660.h"
 #include "vapor/sha256.h"
+#include "vapor/saves.h"
 #include "vapor/util.h"
 #include "vapor/wise.h"
 
 /* Kept inside the install directory so uninstall is a single tree removal and
  * launching works with the server unreachable. */
-#define VAPOR_META_DIR  ".vapor"
-#define VAPOR_META_FILE ".vapor/manifest.json"
+#define VAPOR_META_DIR          ".vapor"
+#define VAPOR_META_FILE         ".vapor/manifest.json"
+#define VAPOR_META_INSTALL_FILE ".vapor/install.json"
 
 static int
 join(char *out, size_t outsz, const char *a, const char *b)
@@ -97,6 +101,8 @@ typedef struct {
     inst_phase        phase;
     int               aborted;
     int               last_status_pct;
+    uint64_t          last_done;
+    uint64_t          last_total;
 } inst_progress;
 
 typedef struct {
@@ -104,10 +110,19 @@ typedef struct {
     void             *ud;
     vapor_status_fn   on_status;
     void             *on_status_ud;
+    int             (*poll_cancel)(void *ud);
+    void             *poll_ud;
 } setup_hooks;
 
 static int setup_game_impl(vapor_client *vc, const char *game_id,
                            const setup_hooks *hooks);
+static int uninstall_game_impl(vapor_client *vc, const char *game_id,
+                               vapor_progress_fn cb, void *ud);
+static int mkdirs_for_file(const char *path);
+static int find_local_uninstaller(const char *dir, char *out, size_t outsz);
+static int persist_install(vapor_client *vc, const vapor_install *rec);
+static void capture_uninstall_recipe(vapor_install *rec, const char *extra_dir);
+static void merge_install_sidecar(vapor_install *rec);
 
 static uint64_t
 inst_phase_begin(inst_phase p)
@@ -136,11 +151,45 @@ progress_emit(inst_progress *p, uint64_t overall)
     if (overall > INSTALL_PROGRESS_MAX) {
         overall = INSTALL_PROGRESS_MAX;
     }
+    p->last_done = overall;
+    p->last_total = INSTALL_PROGRESS_MAX;
     if (p->cb && p->cb(p->ud, overall, INSTALL_PROGRESS_MAX) != 0) {
         p->aborted = 1;
         return -1;
     }
     return 0;
+}
+
+static int
+progress_poll_cancel(void *ud)
+{
+    inst_progress *p = (inst_progress *)ud;
+
+    if (!p) {
+        return 0;
+    }
+    if (p->aborted) {
+        return 1;
+    }
+    if (!p->cb) {
+        return 0;
+    }
+    if (p->cb(p->ud, p->last_done, p->last_total ? p->last_total : 1) != 0) {
+        p->aborted = 1;
+        return 1;
+    }
+    return 0;
+}
+
+static int
+hooks_cancel(void *ud)
+{
+    const setup_hooks *h = (const setup_hooks *)ud;
+
+    if (!h || !h->poll_cancel) {
+        return 0;
+    }
+    return h->poll_cancel(h->poll_ud) != 0;
 }
 
 static int
@@ -386,6 +435,105 @@ copy_file(const char *src, const char *dst, inst_progress *prog)
     return rc;
 }
 
+static int
+mount_dir_for(vapor_client *vc, const char *game_id, char *out, size_t outsz)
+{
+    int n = snprintf(out, outsz, "%s/%s/mnt/%s", vc->cfg.library_dir,
+                     VAPOR_META_DIR, game_id);
+
+    if (n < 0 || (size_t)n >= outsz) {
+        vapor_client_set_error(vc, "library path is too long");
+        return -1;
+    }
+    vapor_plat_native_path(out);
+    return 0;
+}
+
+static int
+rel_file_exists(const char *root, const char *rel)
+{
+    char path[VAPOR_PATH_MAX];
+
+    if (!root || !root[0] || !rel || !rel[0]) {
+        return 0;
+    }
+    if (join(path, sizeof(path), root, rel) != 0) {
+        return 0;
+    }
+    vapor_plat_native_path(path);
+    return vapor_plat_exists(path) && !vapor_plat_is_dir(path);
+}
+
+static int
+paths_equal(const char *a, const char *b)
+{
+    char aa[VAPOR_PATH_MAX];
+    char bb[VAPOR_PATH_MAX];
+
+    snprintf(aa, sizeof(aa), "%s", a ? a : "");
+    snprintf(bb, sizeof(bb), "%s", b ? b : "");
+    vapor_plat_native_path(aa);
+    vapor_plat_native_path(bb);
+    return vapor_str_eq_ci(aa, bb);
+}
+
+typedef struct {
+    const char *dst_root;
+    int         failed;
+    size_t      nfiles;
+} copy_tree_ctx;
+
+static int
+copy_tree_cb(const char *rel, const char *abs, void *ud)
+{
+    copy_tree_ctx *c = (copy_tree_ctx *)ud;
+    char           dest[VAPOR_PATH_MAX];
+
+    if (join(dest, sizeof(dest), c->dst_root, rel) != 0) {
+        c->failed = 1;
+        return 1;
+    }
+    vapor_plat_native_path(dest);
+    if (mkdirs_for_file(dest) != 0 || copy_file(abs, dest, NULL) != 0) {
+        c->failed = 1;
+        return 1;
+    }
+    c->nfiles++;
+    return 0;
+}
+
+static int
+copy_tree(const char *src, const char *dst, size_t *out_files)
+{
+    copy_tree_ctx ctx;
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.dst_root = dst;
+    if (vapor_plat_walk_files(src, copy_tree_cb, &ctx) != 0 || ctx.failed) {
+        return -1;
+    }
+    if (out_files) {
+        *out_files += ctx.nfiles;
+    }
+    return 0;
+}
+
+static int
+relocate_file(const char *src, const char *dst)
+{
+    if (mkdirs_for_file(dst) != 0) {
+        return -1;
+    }
+    if (rename(src, dst) == 0) {
+        return 0;
+    }
+    if (copy_file(src, dst, NULL) != 0) {
+        return -1;
+    }
+    remove(src);
+    return 0;
+}
+
 /* --------------------------------------------------------------- manifest */
 
 int
@@ -457,6 +605,185 @@ write_local_manifest(vapor_client *vc, const char *install_dir,
     fclose(f);
     free(json);
     return 0;
+}
+
+/* Retail Doom 3 is launched through the shared dhewm3 runtime, not as a
+ * native exe. The tree stays in the library; the port lives under
+ * {data_dir}/runtimes and must not be removed with the game. */
+static int
+looks_dhewm3_payload(const char *dir, const char *id, const char *exec)
+{
+    char        pak[VAPOR_PATH_MAX], gamepak[VAPOR_PATH_MAX];
+    char        stem[VAPOR_ID_MAX + 1];
+    const char *base;
+
+    if (!dir || join(pak, sizeof(pak), dir, "base/pak000.pk4") != 0
+        || !vapor_plat_exists(pak)) {
+        return 0;
+    }
+    if (join(gamepak, sizeof(gamepak), dir, "base/game00.pk4") != 0
+        || !vapor_plat_exists(gamepak)) {
+        return 0;
+    }
+    if (id && (vapor_slug_match(id, "doom3") || vapor_slug_match(id, "d3xp"))) {
+        return 1;
+    }
+    base = exec ? strrchr(exec, '/') : NULL;
+    base = base ? base + 1 : (exec ? exec : "");
+    if (base[0] && vapor_id_slug_stem(base, stem, sizeof(stem)) == 0
+        && (vapor_slug_match(stem, "doom3") || vapor_slug_match(stem, "d3xp"))) {
+        return 1;
+    }
+    return 0;
+}
+
+static void
+classify_install_kind(vapor_install *rec, int needs_setup, const vapor_target *t,
+                      const char *dir)
+{
+    if (needs_setup) {
+        snprintf(rec->install_kind, sizeof(rec->install_kind), "%s",
+                 VAPOR_INSTALL_KIND_OS_PRODUCT);
+    } else if ((t && t->runtime && t->runtime[0]
+                && strcmp(t->runtime, "native") != 0)
+               || looks_dhewm3_payload(dir, rec->game_id,
+                                       t && t->exec ? t->exec : "")) {
+        snprintf(rec->install_kind, sizeof(rec->install_kind), "%s",
+                 VAPOR_INSTALL_KIND_RUNTIME);
+    } else {
+        snprintf(rec->install_kind, sizeof(rec->install_kind), "%s",
+                 VAPOR_INSTALL_KIND_PORTABLE);
+    }
+}
+
+static int
+write_install_sidecar(const vapor_install *rec)
+{
+    const char *root;
+    char        meta_dir[VAPOR_PATH_MAX], file[VAPOR_PATH_MAX];
+    cJSON      *obj;
+    char       *json;
+    FILE       *f;
+
+    root = rec->payload_dir[0] ? rec->payload_dir : rec->install_dir;
+    if (!root || !root[0]) {
+        return 0;
+    }
+    if (join(meta_dir, sizeof(meta_dir), root, VAPOR_META_DIR) != 0
+        || join(file, sizeof(file), root, VAPOR_META_INSTALL_FILE) != 0) {
+        return -1;
+    }
+    if (vapor_plat_mkdirs(meta_dir) != 0) {
+        return -1;
+    }
+    obj = cJSON_CreateObject();
+    if (!obj) {
+        return -1;
+    }
+    cJSON_AddStringToObject(obj, "install_kind", rec->install_kind);
+    cJSON_AddStringToObject(obj, "uninstall_exe", rec->uninstall_exe);
+    cJSON_AddStringToObject(obj, "uninstall_params", rec->uninstall_params);
+    cJSON_AddStringToObject(obj, "product_dir", rec->product_dir);
+    cJSON_AddStringToObject(obj, "setup_state", rec->setup_state);
+    cJSON_AddStringToObject(obj, "setup_rel", rec->setup_rel);
+    cJSON_AddStringToObject(obj, "profile_launch", rec->profile_launch);
+    cJSON_AddStringToObject(obj, "profile_uninstall", rec->profile_uninstall);
+    json = cJSON_Print(obj);
+    cJSON_Delete(obj);
+    if (!json) {
+        return -1;
+    }
+    f = fopen(file, "w");
+    if (!f) {
+        free(json);
+        return -1;
+    }
+    fputs(json, f);
+    fclose(f);
+    free(json);
+    return 0;
+}
+
+static int
+persist_install(vapor_client *vc, const vapor_install *rec)
+{
+    if (vapor_db_record_install(vc, rec) != 0) {
+        return -1;
+    }
+    if (write_install_sidecar(rec) != 0) {
+        printf("  warning: could not write %s/%s\n",
+               rec->payload_dir[0] ? rec->payload_dir : rec->install_dir,
+               VAPOR_META_INSTALL_FILE);
+    }
+    return 0;
+}
+
+static void
+apply_install_sidecar_file(vapor_install *rec, const char *dir)
+{
+    char   file[VAPOR_PATH_MAX];
+    char  *json;
+    size_t len = 0;
+    cJSON *obj;
+
+    if (!dir || !dir[0] || join(file, sizeof(file), dir, VAPOR_META_INSTALL_FILE) != 0) {
+        return;
+    }
+    vapor_plat_native_path(file);
+    json = vapor_read_file(file, &len);
+    if (!json) {
+        return;
+    }
+    obj = cJSON_ParseWithLength(json, len);
+    free(json);
+    if (!obj) {
+        return;
+    }
+    if (!rec->install_kind[0]) {
+        vapor_json_copy(rec->install_kind, sizeof(rec->install_kind), obj,
+                        "install_kind", "");
+    }
+    if (!rec->uninstall_exe[0]) {
+        vapor_json_copy(rec->uninstall_exe, sizeof(rec->uninstall_exe), obj,
+                        "uninstall_exe", "");
+    }
+    if (!rec->uninstall_params[0]) {
+        vapor_json_copy(rec->uninstall_params, sizeof(rec->uninstall_params),
+                        obj, "uninstall_params", "");
+    }
+    if (!rec->product_dir[0]) {
+        vapor_json_copy(rec->product_dir, sizeof(rec->product_dir), obj,
+                        "product_dir", "");
+    }
+    if (!rec->setup_state[0]) {
+        vapor_json_copy(rec->setup_state, sizeof(rec->setup_state), obj,
+                        "setup_state", "");
+    }
+    if (!rec->setup_rel[0]) {
+        vapor_json_copy(rec->setup_rel, sizeof(rec->setup_rel), obj, "setup_rel",
+                        "");
+    }
+    if (!rec->profile_launch[0]) {
+        vapor_json_copy(rec->profile_launch, sizeof(rec->profile_launch), obj,
+                        "profile_launch", "");
+    }
+    if (!rec->profile_uninstall[0]) {
+        vapor_json_copy(rec->profile_uninstall, sizeof(rec->profile_uninstall),
+                        obj, "profile_uninstall", "");
+    }
+    cJSON_Delete(obj);
+}
+
+static void
+assign_setup_state(vapor_install *rec, const char *state)
+{
+    snprintf(rec->setup_state, sizeof(rec->setup_state), "%s", state ? state : "");
+    if (!rec->setup_state[0]
+        || strcmp(rec->setup_state, VAPOR_SETUP_COMPLETED) == 0) {
+        rec->setup_pending = 0;
+    } else {
+        rec->setup_pending = 1;
+    }
 }
 
 int
@@ -787,11 +1114,25 @@ path_basename(const char *path)
     return s ? s + 1 : path;
 }
 
+/* .bin is also a Linux binary suffix. A disc image has an ISO 9660
+ * filesystem; without a path, refuse to treat the name as a program. */
 static int
-looks_iso_name(const char *name)
+looks_disc_image(const char *name, const char *abs)
 {
-    return vapor_str_ends_with_ci(name, ".iso")
-        || vapor_str_ends_with_ci(name, ".img");
+    if (!name) {
+        return 0;
+    }
+    if (vapor_str_ends_with_ci(name, ".iso")
+        || vapor_str_ends_with_ci(name, ".img")) {
+        return 1;
+    }
+    if (!vapor_str_ends_with_ci(name, ".bin")) {
+        return 0;
+    }
+    if (!abs) {
+        return 1;
+    }
+    return vapor_iso_is_image(abs);
 }
 
 static void
@@ -881,7 +1222,8 @@ static int
 is_junk_exec(const char *base)
 {
     static const char *const junk[] = {
-        "setup.exe", "install.exe", "installer.exe", "unins000.exe",
+        "setup.exe", "install.exe", "installer.exe", "setup.com", "install.com",
+        "unins000.exe",
         "uninstall.exe", "dxsetup.exe", "autorun.exe", "launch.exe",
         "setup_", "instmsi", "vcredist", "vc_redist",
         "unitycrashhandler", "crashreporter", "easyanticheat",
@@ -904,13 +1246,30 @@ is_junk_exec(const char *base)
         || vapor_str_ends_with_ci(base, "update.exe")) {
         return 1;
     }
+    if (vapor_str_ends_with_ci(base, ".exe")) {
+        const char *p;
+
+        for (p = base; *p; p++) {
+            if ((p[0] == 'p' || p[0] == 'P') && (p[1] == 'a' || p[1] == 'A')
+                && (p[2] == 't' || p[2] == 'T') && (p[3] == 'c' || p[3] == 'C')
+                && (p[4] == 'h' || p[4] == 'H')) {
+                return 1;
+            }
+        }
+    }
     return 0;
 }
 
 static int
 looks_windows_exec(const char *name)
 {
-    return vapor_str_ends_with_ci(name, ".exe");
+    const char *base = name ? path_basename(name) : "";
+
+    if (vapor_dos_name_is_junk(base)) {
+        return 0;
+    }
+    return vapor_str_ends_with_ci(base, ".exe")
+           || vapor_str_ends_with_ci(base, ".com");
 }
 
 static int
@@ -1021,7 +1380,7 @@ scan_install_cb(const char *rel, const char *abs, void *ud)
     const char   *base = path_basename(rel);
     int           score;
 
-    if (looks_iso_name(base)) {
+    if (looks_disc_image(base, abs)) {
         if (s->niso < VAPOR_MAX_DISCS) {
             snprintf(s->iso_rel[s->niso], sizeof(s->iso_rel[s->niso]), "%s",
                      rel);
@@ -1174,8 +1533,7 @@ tree_has_iso_cb(const char *rel, const char *abs, void *ud)
 {
     int *found = (int *)ud;
 
-    (void)abs;
-    if (looks_iso_name(path_basename(rel))) {
+    if (looks_disc_image(path_basename(rel), abs)) {
         *found = 1;
         return 1;
     }
@@ -1409,6 +1767,226 @@ wait_install_dest(const char *requested, const char *name, const char *id,
     return 0;
 }
 
+/* Read leftover disc images into {library}/.vapor/mnt/{id}. A portable tree is
+ * copied into the library folder and the mount is removed. An installer kit
+ * stays on the mount so setup can read it from there. 0 on success, -1 on
+ * error. A failed extract leaves the image in the mount; cancel removes it. */
+static int
+extract_iso_at(vapor_client *vc, inst_progress *ip, const char *iso_path,
+               const char *mount, int index, int count)
+{
+    char              iso_err[256];
+    iso_progress_wrap wrap;
+    char              msg[192];
+    const char       *base = path_basename(iso_path);
+
+    snprintf(msg, sizeof(msg), "extracting disc image %s (%d/%d)", base, index,
+             count);
+    progress_status(ip, msg);
+    printf("extracting disc image %s (%d/%d)\n", base, index, count);
+    wrap.p = ip;
+    wrap.span_i = (uint64_t)(index > 0 ? index - 1 : 0);
+    wrap.span_n = (uint64_t)count + 1;
+    memset(iso_err, 0, sizeof(iso_err));
+    if (vapor_iso_extract_progress(iso_path, mount, iso_err, sizeof(iso_err),
+                                   on_iso_progress, &wrap)
+        != 0) {
+        if (progress_cancelled(ip, vc)) {
+            return -1;
+        }
+        vapor_client_set_error(vc, "disc unpack failed (%s)",
+                               iso_err[0] ? iso_err : "unreadable image");
+        return -1;
+    }
+    remove(iso_path);
+    return 0;
+}
+
+static int
+keep_failed_iso(const char *iso_path, const char *mount)
+{
+    char kept[VAPOR_PATH_MAX];
+
+    if (join(kept, sizeof(kept), mount, path_basename(iso_path)) != 0) {
+        return -1;
+    }
+    vapor_plat_native_path(kept);
+    if (paths_equal(iso_path, kept)) {
+        return 0;
+    }
+    return relocate_file(iso_path, kept);
+}
+
+static int
+scan_is_playable(const vapor_manifest *m, const char *root, const install_scan *s)
+{
+    const vapor_target *t;
+
+    if (looks_playable_exec(s->win_exec) || looks_playable_exec(s->lin_exec)) {
+        return 1;
+    }
+    if (m->install.launch && rel_file_exists(root, m->install.launch)
+        && looks_playable_exec(m->install.launch)) {
+        return 1;
+    }
+    t = vapor_manifest_pick_target(m, vapor_host_platform(), vapor_host_arch());
+    if (t && t->exec && looks_playable_exec(t->exec) && rel_file_exists(root, t->exec)) {
+        return 1;
+    }
+    return 0;
+}
+
+static int
+stage_discs(vapor_client *vc, vapor_manifest *m, inst_progress *ip,
+            const char *install_dir, const char *downloaded, int legacy_iso,
+            install_scan *content, char *payload_out, size_t payload_sz,
+            size_t *nfiles, int *unpacked_iso, int *disc_installer)
+{
+    char         mount[VAPOR_PATH_MAX];
+    install_scan disc;
+    wise_scan    ws;
+    int          explicit_setup;
+    int          playable;
+    int          i;
+    int          niso = content->niso;
+
+    *disc_installer = 0;
+    if (mount_dir_for(vc, m->id, mount, sizeof(mount)) != 0) {
+        return -1;
+    }
+    if (vapor_plat_exists(mount) && vapor_plat_remove_tree(mount) != 0) {
+        vapor_client_set_error(vc, "cannot clear %s", mount);
+        return -1;
+    }
+    if (vapor_plat_mkdirs(mount) != 0) {
+        vapor_client_set_error(vc, "cannot create %s", mount);
+        return -1;
+    }
+
+    if (legacy_iso) {
+        char iso_path[VAPOR_PATH_MAX];
+
+        if (join(iso_path, sizeof(iso_path), mount, m->package.file) != 0) {
+            vapor_client_set_error(vc, "install path is too long");
+            vapor_plat_remove_tree(mount);
+            return -1;
+        }
+        vapor_plat_native_path(iso_path);
+        if (copy_file(downloaded, iso_path, ip) != 0) {
+            if (!progress_cancelled(ip, vc)) {
+                vapor_client_set_error(vc, "cannot copy %s into the disc folder",
+                                       m->package.file);
+            }
+            vapor_plat_remove_tree(mount);
+            return -1;
+        }
+        if (extract_iso_at(vc, ip, iso_path, mount, 1, 1) != 0) {
+            if (progress_cancelled(ip, vc)) {
+                vapor_plat_remove_tree(mount);
+            }
+            return -1;
+        }
+    }
+
+    for (i = 0; i < niso; i++) {
+        char iso_path[VAPOR_PATH_MAX];
+
+        if (join(iso_path, sizeof(iso_path), install_dir, content->iso_rel[i]) != 0) {
+            vapor_client_set_error(vc, "install path is too long");
+            vapor_plat_remove_tree(mount);
+            return -1;
+        }
+        vapor_plat_native_path(iso_path);
+        if (extract_iso_at(vc, ip, iso_path, mount, i + 1, niso) != 0) {
+            if (progress_cancelled(ip, vc)) {
+                vapor_plat_remove_tree(mount);
+                return -1;
+            }
+            (void)keep_failed_iso(iso_path, mount);
+            return -1;
+        }
+    }
+
+    memset(&ws, 0, sizeof(ws));
+    ws.root = mount;
+    progress_status(ip, "unpacking bundled installers...");
+    vapor_plat_walk_files(mount, wise_install_cb, &ws);
+    vapor_disc_finish_install(mount);
+    if (discover_install_content(vc, mount, m, &disc) != 0) {
+        return -1;
+    }
+
+    explicit_setup = m->install.setup && rel_file_exists(mount, m->install.setup);
+    playable = scan_is_playable(m, mount, &disc);
+    if (explicit_setup || ((disc.has_installer || disc.niso > 0) && !playable)) {
+        *disc_installer = 1;
+        if ((size_t)snprintf(payload_out, payload_sz, "%s", mount) >= payload_sz) {
+            vapor_client_set_error(vc, "install path is too long");
+            return -1;
+        }
+        *content = disc;
+        if (explicit_setup) {
+            snprintf(content->setup_rel, sizeof(content->setup_rel), "%s",
+                     m->install.setup);
+            content->has_installer = 1;
+        }
+        *unpacked_iso = 1;
+        return 0;
+    }
+    if (!playable) {
+        vapor_client_set_error(vc,
+                               "disc image for %s has no installer and no game "
+                               "executable",
+                               m->id);
+        return -1;
+    }
+    if (copy_tree(mount, install_dir, nfiles) != 0) {
+        vapor_client_set_error(vc, "cannot copy the disc contents into %s",
+                               install_dir);
+        return -1;
+    }
+    vapor_plat_remove_tree(mount);
+    *unpacked_iso = 1;
+    if (discover_install_content(vc, install_dir, m, content) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* A windows target with no runtime is native until the file itself is DOS. */
+static void
+note_dos_runtime(vapor_manifest *m, const char *root)
+{
+    size_t i;
+
+    if (!m || !root || !root[0]) {
+        return;
+    }
+    for (i = 0; i < m->ntargets; i++) {
+        vapor_target *t = &m->targets[i];
+        char          path[VAPOR_PATH_MAX];
+
+        if (!t->platform || strcmp(t->platform, "windows") != 0) {
+            continue;
+        }
+        if (t->runtime && t->runtime[0]) {
+            continue;
+        }
+        if (!t->exec || !t->exec[0]) {
+            continue;
+        }
+        if ((size_t)snprintf(path, sizeof(path), "%s/%s", root, t->exec)
+            >= sizeof(path)) {
+            continue;
+        }
+        vapor_plat_native_path(path);
+        if (!vapor_file_is_dos_exe(path)) {
+            continue;
+        }
+        t->runtime = vapor_strdup("dosbox");
+    }
+}
+
 /* ---------------------------------------------------------------- install */
 
 int
@@ -1432,6 +2010,10 @@ vapor_install_game(vapor_client *vc, const char *game_id, const char *version,
     int                 unpacked_iso = 0;
     int                 needs_setup = 0;
     int                 cached = 0;
+    int                 legacy_iso = 0;
+    int                 disc_installer = 0;
+    int                 hold_images = 0;
+    char                payload_dir[VAPOR_PATH_MAX];
     install_scan        content;
     inst_progress       ip;
 
@@ -1441,6 +2023,7 @@ vapor_install_game(vapor_client *vc, const char *game_id, const char *version,
     }
 
     memset(&ip, 0, sizeof(ip));
+    payload_dir[0] = '\0';
     ip.cb = cb;
     ip.ud = ud;
     ip.on_status = opts->on_status;
@@ -1452,6 +2035,14 @@ vapor_install_game(vapor_client *vc, const char *game_id, const char *version,
     }
 
     have_existing = (vapor_db_get_install(vc, m.id, &existing) == 0);
+    if (have_existing && vapor_install_is_external(&existing)) {
+        vapor_client_set_error(vc,
+                               "%s is a local shortcut. Remove it from the "
+                               "library before installing a catalog copy",
+                               m.id);
+        vapor_manifest_free(&m);
+        return -1;
+    }
     if (have_existing && !opts->force
         && strcmp(existing.version, m.version) == 0) {
         vapor_client_set_error(vc, "%s %s is already installed", m.id, m.version);
@@ -1568,7 +2159,16 @@ verified:
         return 0;
     }
 
-    /* Only now is the existing install disturbed. */
+    /* Only now is the existing install disturbed. A previous attempt may
+     * also have left a disc mount; drop it before this install rebuilds it. */
+    {
+        char stale_mount[VAPOR_PATH_MAX];
+
+        if (mount_dir_for(vc, m.id, stale_mount, sizeof(stale_mount)) == 0
+            && vapor_plat_exists(stale_mount)) {
+            (void)vapor_plat_remove_tree(stale_mount);
+        }
+    }
     if (vapor_plat_exists(install_dir) && vapor_plat_remove_tree(install_dir) != 0) {
         vapor_client_set_error(vc, "cannot clear the previous install at %s",
                                install_dir);
@@ -1594,6 +2194,10 @@ verified:
             vapor_manifest_free(&m);
             return -1;
         }
+    } else if (strcmp(m.package.format, "iso") == 0) {
+        /* Staged into the temp mount below, not the library folder.
+         * The image is never handed to the shell to mount. */
+        legacy_iso = 1;
     } else {
         char dest[VAPOR_PATH_MAX];
         if (join(dest, sizeof(dest), install_dir, m.package.file) != 0) {
@@ -1629,65 +2233,33 @@ verified:
         vapor_manifest_free(&m);
         return -1;
     }
-    if (content.niso > 0) {
-        int i;
-        int any_unpacked = 0;
-        uint64_t post_steps = (uint64_t)content.niso + 1;
+    hold_images = m.install_mode
+                  && (strcmp(m.install_mode, "portable") == 0
+                      || strcmp(m.install_mode, "keep_disc") == 0);
+    if (hold_images && legacy_iso) {
+        char dest[VAPOR_PATH_MAX];
+        const char *leaf = m.package.file ? m.package.file : "disc.iso";
 
-        for (i = 0; i < content.niso; i++) {
-            char              iso_path[VAPOR_PATH_MAX];
-            char              iso_err[256];
-            iso_progress_wrap wrap;
-            char              msg[192];
-
-            if (join(iso_path, sizeof(iso_path), install_dir, content.iso_rel[i])
-                != 0) {
-                vapor_client_set_error(vc, "install path is too long");
-                vapor_plat_remove_tree(install_dir);
-                vapor_manifest_free(&m);
-                return -1;
-            }
-            vapor_plat_native_path(iso_path);
-            snprintf(msg, sizeof(msg), "extracting disc image %s (%d/%d)",
-                     content.iso_rel[i], i + 1, content.niso);
-            progress_status(&ip, msg);
-            printf("extracting disc image %s (%d/%d)\n", content.iso_rel[i],
-                   i + 1, content.niso);
-            wrap.p = &ip;
-            wrap.span_i = (uint64_t)i;
-            wrap.span_n = post_steps;
-            if (vapor_iso_extract_progress(iso_path, install_dir, iso_err,
-                                           sizeof(iso_err), on_iso_progress,
-                                           &wrap)
-                != 0) {
-                if (progress_cancelled(&ip, vc)) {
-                    vapor_plat_remove_tree(install_dir);
-                    vapor_manifest_free(&m);
-                    return -1;
-                }
-                printf("  disc unpack failed (%s); leaving the image in place\n",
-                       iso_err);
-            } else {
-                remove(iso_path);
-                any_unpacked = 1;
-            }
+        if (join(dest, sizeof(dest), install_dir, leaf) != 0
+            || copy_file(zip_path, dest, &ip) != 0) {
+            vapor_client_set_error(vc, "cannot keep the disc image for %s", m.id);
+            vapor_plat_remove_tree(install_dir);
+            vapor_manifest_free(&m);
+            return -1;
         }
-        if (any_unpacked) {
-            unpacked_iso = 1;
-            if (discover_install_content(vc, install_dir, &m, &content) != 0) {
-                vapor_plat_remove_tree(install_dir);
-                vapor_manifest_free(&m);
-                return -1;
-            }
-        }
-        if (progress_report_span(&ip, post_steps - 1, post_steps, 0, 1) != 0) {
+        nfiles = 1;
+    } else if (legacy_iso || content.niso > 0) {
+        if (stage_discs(vc, &m, &ip, install_dir, zip_path, legacy_iso, &content,
+                        payload_dir, sizeof(payload_dir), &nfiles, &unpacked_iso,
+                        &disc_installer)
+            != 0) {
             vapor_plat_remove_tree(install_dir);
             vapor_manifest_free(&m);
             return -1;
         }
     }
-    has_iso = content.niso > 0;
-    {
+    has_iso = !disc_installer && content.niso > 0;
+    if (!hold_images && !disc_installer) {
         wise_scan ws;
 
         memset(&ws, 0, sizeof(ws));
@@ -1716,8 +2288,19 @@ verified:
             || is_junk_exec(path_basename(target->exec)))) {
         target = NULL;
     }
-    needs_setup = (content.has_installer || content.niso > 0) && !target
-                  && !content.win_exec[0] && !content.lin_exec[0];
+    if (disc_installer) {
+        needs_setup = 1;
+        target = NULL;
+        has_iso = 0;
+    } else {
+        needs_setup = (content.has_installer || content.niso > 0) && !target
+                      && !content.win_exec[0] && !content.lin_exec[0];
+    }
+    if (m.install_mode && strcmp(m.install_mode, "setup") == 0) {
+        needs_setup = 1;
+    } else if (hold_images) {
+        needs_setup = 0;
+    }
     if (strcmp(vapor_host_platform(), "windows") != 0 && needs_setup) {
         /* Linux can still store the kit; it cannot run the installer. */
         needs_setup = 1;
@@ -1753,25 +2336,65 @@ verified:
             }
         }
     }
-    if (write_local_manifest(vc, install_dir, &m) != 0) {
+    if (!disc_installer) {
+        snprintf(payload_dir, sizeof(payload_dir), "%s", install_dir);
+    }
+    if (m.install.launch && rel_file_exists(payload_dir, m.install.launch)
+        && looks_playable_exec(m.install.launch)
+        && strcmp(vapor_host_platform(), "windows") == 0) {
+        if (set_windows_exec(&m, m.install.launch) != 0) {
+            vapor_client_set_error(vc, "out of memory");
+            vapor_plat_remove_tree(install_dir);
+            vapor_manifest_free(&m);
+            return -1;
+        }
+    }
+    note_dos_runtime(&m, payload_dir[0] ? payload_dir : install_dir);
+    if (write_local_manifest(vc, payload_dir, &m) != 0) {
         vapor_plat_remove_tree(install_dir);
+        if (disc_installer) {
+            vapor_plat_remove_tree(payload_dir);
+        }
         vapor_manifest_free(&m);
         return -1;
     }
 
-    vapor_plat_dir_size(install_dir, &on_disk);
+    vapor_plat_dir_size(disc_installer ? payload_dir : install_dir, &on_disk);
 
     memset(&rec, 0, sizeof(rec));
     snprintf(rec.game_id, sizeof(rec.game_id), "%s", m.id);
     snprintf(rec.version, sizeof(rec.version), "%s", m.version);
     snprintf(rec.name, sizeof(rec.name), "%s", m.name ? m.name : m.id);
     snprintf(rec.install_dir, sizeof(rec.install_dir), "%s", install_dir);
-    snprintf(rec.payload_dir, sizeof(rec.payload_dir), "%s", install_dir);
+    snprintf(rec.payload_dir, sizeof(rec.payload_dir), "%s", payload_dir);
     rec.installed_at = vapor_now_unix();
     rec.size_on_disk = on_disk;
-    rec.setup_pending = needs_setup ? 1 : 0;
+    classify_install_kind(&rec, needs_setup, target, install_dir);
+    if (m.install.setup && rel_file_exists(payload_dir, m.install.setup)) {
+        snprintf(rec.setup_rel, sizeof(rec.setup_rel), "%s", m.install.setup);
+    } else if (content.setup_rel[0]
+               && rel_file_exists(payload_dir, content.setup_rel)) {
+        snprintf(rec.setup_rel, sizeof(rec.setup_rel), "%s", content.setup_rel);
+    }
+    if (m.install.launch && rel_file_exists(payload_dir, m.install.launch)) {
+        snprintf(rec.profile_launch, sizeof(rec.profile_launch), "%s",
+                 m.install.launch);
+    } else if (target && target->exec && looks_playable_exec(target->exec)) {
+        snprintf(rec.profile_launch, sizeof(rec.profile_launch), "%s", target->exec);
+    } else if (looks_playable_exec(content.win_exec)) {
+        snprintf(rec.profile_launch, sizeof(rec.profile_launch), "%s",
+                 content.win_exec);
+    } else if (looks_playable_exec(content.lin_exec)) {
+        snprintf(rec.profile_launch, sizeof(rec.profile_launch), "%s",
+                 content.lin_exec);
+    }
+    if (m.install.uninstall && m.install.uninstall[0]) {
+        snprintf(rec.profile_uninstall, sizeof(rec.profile_uninstall), "%s",
+                 m.install.uninstall);
+    }
+    assign_setup_state(&rec, needs_setup ? VAPOR_SETUP_PENDING : "");
 
-    if (vapor_db_record_install(vc, &rec) != 0) {
+    if (persist_install(vc, &rec) != 0) {
         vapor_manifest_free(&m);
         return -1;
     }
@@ -1784,7 +2407,7 @@ verified:
         char pretty[32];
         vapor_format_bytes(on_disk, pretty, sizeof(pretty));
         printf("installed %s %s\n", m.id, m.version);
-        printf("  location ... %s\n", install_dir);
+        printf("  location ... %s\n", disc_installer ? payload_dir : install_dir);
         printf("  contents ... %zu file(s), %s\n", nfiles, pretty);
         if (nexec > 0) {
             printf("  exec bits .. %zu file(s) made executable\n", nexec);
@@ -1792,7 +2415,9 @@ verified:
         if (has_iso) {
             printf("  disc image . %d image(s) left in place\n", content.niso);
         }
-        if (unpacked_iso) {
+        if (unpacked_iso && disc_installer) {
+            printf("  disc image . extracted for the installer\n");
+        } else if (unpacked_iso) {
             printf("  disc image . unpacked into the install directory\n");
         }
         if (needs_setup) {
@@ -1812,6 +2437,9 @@ verified:
         if (progress_enter(&ip, INST_PH_SETUP,
                            "running the Windows installer...")
             != 0) {
+            if (disc_installer) {
+                vapor_plat_remove_tree(rec.payload_dir);
+            }
             return -1;
         }
         {
@@ -1822,6 +2450,8 @@ verified:
             setup.ud = &ip;
             setup.on_status = on_setup_status;
             setup.on_status_ud = &ip;
+            setup.poll_cancel = progress_poll_cancel;
+            setup.poll_ud = &ip;
             src = setup_game_impl(vc, rec.game_id, &setup);
         }
         if (src < 0) {
@@ -1845,6 +2475,62 @@ verified:
 }
 
 static int
+run_tracked_ui(vapor_client *vc, vapor_install *rec, const char *setup_path,
+               const char *cwd, const char *params, int *exit_code,
+               const setup_hooks *hooks)
+{
+    int src = vapor_plat_run_ui(setup_path, cwd, params, exit_code,
+                                hooks ? hooks_cancel : NULL, (void *)hooks);
+
+    if (src < 0) {
+        assign_setup_state(rec, VAPOR_SETUP_FAILED);
+        (void)persist_install(vc, rec);
+        vapor_client_set_error(vc, "could not start %s", setup_path);
+        return -1;
+    }
+    return src > 0 ? 1 : 0;
+}
+
+static int
+capture_finished_dest(const char *requested, const char *name, const char *id,
+                      const char *slug, char *play_dir, size_t play_n,
+                      char *exec_rel, size_t exec_n)
+{
+    char product[VAPOR_PATH_MAX];
+
+    if (dest_is_complete(requested, slug, exec_rel, exec_n)) {
+        snprintf(play_dir, play_n, "%s", requested);
+        return 1;
+    }
+    product[0] = '\0';
+    if (vapor_plat_find_product_dir(name, id, product, sizeof(product)) == 0
+        && dest_is_complete(product, slug, exec_rel, exec_n)) {
+        snprintf(play_dir, play_n, "%s", product);
+        return 1;
+    }
+    return 0;
+}
+
+static int
+note_setup_cancelled(vapor_client *vc, vapor_install *rec, const char *dest,
+                     int exit_code)
+{
+    assign_setup_state(rec, VAPOR_SETUP_CANCELLED);
+    snprintf(rec->install_kind, sizeof(rec->install_kind), "%s",
+             VAPOR_INSTALL_KIND_OS_PRODUCT);
+    if (dest && dest[0]) {
+        capture_uninstall_recipe(rec, dest);
+    }
+    (void)persist_install(vc, rec);
+    vapor_client_set_error(vc,
+                           "the installer for %s was cancelled (exit %d); "
+                           "run Setup again to finish",
+                           rec->name[0] ? rec->name : rec->game_id, exit_code);
+    printf("installer cancelled (exit %d)\n", exit_code);
+    return 1;
+}
+
+static int
 setup_game_impl(vapor_client *vc, const char *game_id, const setup_hooks *hooks)
 {
     vapor_install  rec;
@@ -1855,12 +2541,19 @@ setup_game_impl(vapor_client *vc, const char *game_id, const setup_hooks *hooks)
     char           setup_cwd[VAPOR_PATH_MAX];
     char           play_dir[VAPOR_PATH_MAX];
     char           exec_rel[VAPOR_PATH_MAX];
+    char           dest[VAPOR_PATH_MAX];
     int            exit_code = 0;
     int            found = 0;
 
     if (vapor_db_get_install(vc, game_id, &rec) != 0) {
         vapor_client_set_error(vc, "%s is not installed; run \"vapor install %s\"",
                                game_id, game_id);
+        return -1;
+    }
+    merge_install_sidecar(&rec);
+    if (vapor_install_is_external(&rec)) {
+        vapor_client_set_error(vc, "%s is a local shortcut; Vapor only launches it",
+                               rec.name[0] ? rec.name : game_id);
         return -1;
     }
     if (!rec.setup_pending) {
@@ -1890,34 +2583,55 @@ setup_game_impl(vapor_client *vc, const char *game_id, const setup_hooks *hooks)
         return -1;
     }
 
-    if (scan.setup_rel[0]) {
-        if (join(setup_path, sizeof(setup_path), payload, scan.setup_rel) != 0) {
+    {
+        const char *setup_rel = NULL;
+
+        if (rec.setup_rel[0] && rel_file_exists(payload, rec.setup_rel)) {
+            setup_rel = rec.setup_rel;
+        } else if (m.install.setup && rel_file_exists(payload, m.install.setup)) {
+            setup_rel = m.install.setup;
+        } else if (scan.setup_rel[0]) {
+            setup_rel = scan.setup_rel;
+        }
+        {
+            char        setup_abs[VAPOR_PATH_MAX];
+            const char *disc_abs = NULL;
+
+            if (setup_rel
+                && join(setup_abs, sizeof(setup_abs), payload, setup_rel) == 0) {
+                disc_abs = setup_abs;
+            }
+            if (!setup_rel
+                || looks_disc_image(path_basename(setup_rel), disc_abs)) {
+                assign_setup_state(&rec, VAPOR_SETUP_FAILED);
+                (void)persist_install(vc, &rec);
+                vapor_client_set_error(vc,
+                                       "%s has no setup.exe or .msi to run "
+                                       "(a disc image is extracted before setup, "
+                                       "not opened)",
+                                       game_id);
+                vapor_manifest_free(&m);
+                return -1;
+            }
+        }
+        if (join(setup_path, sizeof(setup_path), payload, setup_rel) != 0) {
             vapor_client_set_error(vc, "installer path is too long");
             vapor_manifest_free(&m);
             return -1;
         }
-    } else if (scan.niso > 0) {
-        if (join(setup_path, sizeof(setup_path), payload, scan.iso_rel[0]) != 0) {
-            vapor_client_set_error(vc, "installer path is too long");
-            vapor_manifest_free(&m);
-            return -1;
-        }
-    } else {
-        vapor_client_set_error(vc, "%s has no setup.exe, .msi, or disc image",
-                               game_id);
-        vapor_manifest_free(&m);
-        return -1;
+        snprintf(rec.setup_rel, sizeof(rec.setup_rel), "%s", setup_rel);
     }
     vapor_plat_native_path(setup_path);
     vapor_plat_native_path(payload);
     prefer_dir_bootstrapper(setup_path, sizeof(setup_path));
     path_dirname(setup_path, setup_cwd, sizeof(setup_cwd));
     vapor_plat_native_path(setup_cwd);
+    dest[0] = '\0';
     {
         vapor_inst_kind kind;
-        char            dest[VAPOR_PATH_MAX];
         char            silent[2048];
         int             silent_rc;
+        int             user_cancelled = 0;
 
         kind = vapor_inst_detect(setup_path, setup_cwd);
         if (join(dest, sizeof(dest), payload, "installed") != 0) {
@@ -1934,6 +2648,11 @@ setup_game_impl(vapor_client *vc, const char *game_id, const setup_hooks *hooks)
 
         silent_rc = vapor_inst_silent_params(kind, setup_path, dest, silent,
                                              sizeof(silent));
+        assign_setup_state(&rec, VAPOR_SETUP_RUNNING);
+        if (persist_install(vc, &rec) != 0) {
+            vapor_manifest_free(&m);
+            return -1;
+        }
         printf("installer %s (%s)\n", setup_path, vapor_inst_kind_name(kind));
         printf("tracking destination %s (and the Uninstall / Program Files "
                "folder the installer creates)\n",
@@ -1944,57 +2663,84 @@ setup_game_impl(vapor_client *vc, const char *game_id, const setup_hooks *hooks)
             return -1;
         }
         if (silent_rc == 0) {
+            int ui;
+
             printf("unattended install to %s\n", dest);
-            if (vapor_plat_run_ui(setup_path, setup_cwd, silent, &exit_code)
-                != 0) {
-                vapor_client_set_error(vc, "could not start %s", setup_path);
+            ui = run_tracked_ui(vc, &rec, setup_path, setup_cwd, silent,
+                                &exit_code, hooks);
+            if (ui < 0) {
                 vapor_manifest_free(&m);
                 return -1;
             }
-            printf("installer process exited (%d); checking %s\n", exit_code,
-                   dest);
-            found = wait_install_dest(dest, rec.name, rec.game_id, m.id,
-                                      play_dir, sizeof(play_dir), exec_rel,
-                                      sizeof(exec_rel), hooks);
-            if (found < 0) {
-                vapor_client_set_error(vc, "install cancelled");
-                vapor_manifest_free(&m);
-                return -1;
+            if (ui > 0) {
+                user_cancelled = 1;
+                printf("installer cancelled; checking %s\n", dest);
+            } else {
+                printf("installer process exited (%d); checking %s\n", exit_code,
+                       dest);
+                found = wait_install_dest(dest, rec.name, rec.game_id, m.id,
+                                          play_dir, sizeof(play_dir), exec_rel,
+                                          sizeof(exec_rel), hooks);
+                if (found < 0) {
+                    note_setup_cancelled(vc, &rec, dest, exit_code);
+                    vapor_manifest_free(&m);
+                    return 1;
+                }
             }
-            if (!found) {
+            if (!found && ui == 0) {
                 printf("unattended install did not finish; opening the wizard\n");
-                if (vapor_plat_run_ui(setup_path, setup_cwd, NULL, &exit_code)
-                    != 0) {
-                    vapor_client_set_error(vc, "could not start %s", setup_path);
+                ui = run_tracked_ui(vc, &rec, setup_path, setup_cwd, NULL,
+                                    &exit_code, hooks);
+                if (ui < 0) {
                     vapor_manifest_free(&m);
                     return -1;
                 }
-                printf("installer process exited (%d); checking destination\n",
-                       exit_code);
+                if (ui > 0) {
+                    user_cancelled = 1;
+                    printf("installer cancelled; checking destination\n");
+                } else {
+                    printf("installer process exited (%d); checking destination\n",
+                           exit_code);
+                }
+            }
+            if (ui > 0 && !found) {
+                found = capture_finished_dest(dest, rec.name, rec.game_id, m.id,
+                                              play_dir, sizeof(play_dir),
+                                              exec_rel, sizeof(exec_rel));
             }
         } else {
+            int ui;
+
             printf("running installer %s\n", setup_path);
             if (kind == VAPOR_INST_ISHIELD) {
                 printf("InstallShield needs the Setup window; silent mode "
                        "hangs on this family, so complete the wizard\n");
             }
-            if (vapor_plat_run_ui(setup_path, setup_cwd, NULL, &exit_code)
-                != 0) {
-                vapor_client_set_error(vc, "could not start %s", setup_path);
+            ui = run_tracked_ui(vc, &rec, setup_path, setup_cwd, NULL, &exit_code,
+                                hooks);
+            if (ui < 0) {
                 vapor_manifest_free(&m);
                 return -1;
             }
-            printf("installer process exited (%d); checking destination\n",
-                   exit_code);
+            if (ui > 0) {
+                user_cancelled = 1;
+                printf("installer cancelled; checking destination\n");
+                found = capture_finished_dest(dest, rec.name, rec.game_id, m.id,
+                                              play_dir, sizeof(play_dir),
+                                              exec_rel, sizeof(exec_rel));
+            } else {
+                printf("installer process exited (%d); checking destination\n",
+                       exit_code);
+            }
         }
-        if (!found) {
+        if (!found && !user_cancelled) {
             found = wait_install_dest(dest, rec.name, rec.game_id, m.id,
                                       play_dir, sizeof(play_dir), exec_rel,
                                       sizeof(exec_rel), hooks);
             if (found < 0) {
-                vapor_client_set_error(vc, "install cancelled");
+                note_setup_cancelled(vc, &rec, dest, exit_code);
                 vapor_manifest_free(&m);
-                return -1;
+                return 1;
             }
         }
         if (!found && dir_is_empty(dest)) {
@@ -2003,12 +2749,10 @@ setup_game_impl(vapor_client *vc, const char *game_id, const setup_hooks *hooks)
     }
 
     if (!found) {
-        vapor_client_set_error(vc,
-                               "the installer for %s exited (%d) but did not "
-                               "finish copying the game; run Setup again after "
-                               "the destination folder is complete",
-                               rec.name[0] ? rec.name : game_id, exit_code);
-        printf("installer did not complete (exit %d)\n", exit_code);
+        /* The wizard may still have registered an Add/Remove Programs entry.
+         * Either way the tree is not a finished install, so this is cancelled
+         * and the disc mount is kept for Setup. */
+        note_setup_cancelled(vc, &rec, dest, exit_code);
         vapor_manifest_free(&m);
         return 1;
     }
@@ -2018,18 +2762,45 @@ setup_game_impl(vapor_client *vc, const char *game_id, const setup_hooks *hooks)
         vapor_manifest_free(&m);
         return -1;
     }
-    if (write_local_manifest(vc, payload, &m) != 0) {
-        vapor_manifest_free(&m);
-        return -1;
-    }
-    snprintf(rec.install_dir, sizeof(rec.install_dir), "%s", play_dir);
-    snprintf(rec.payload_dir, sizeof(rec.payload_dir), "%s", payload);
-    rec.setup_pending = 0;
-    vapor_plat_dir_size(play_dir, &rec.size_on_disk);
-    rec.installed_at = vapor_now_unix();
-    if (vapor_db_record_install(vc, &rec) != 0) {
-        vapor_manifest_free(&m);
-        return -1;
+    {
+        char library_dir[VAPOR_PATH_MAX];
+        char mount[VAPOR_PATH_MAX];
+        int  was_mount = 0;
+
+        if (mount_dir_for(vc, game_id, mount, sizeof(mount)) == 0) {
+            was_mount = paths_equal(payload, mount);
+        }
+        if (was_mount) {
+            if (install_dir_for(vc, game_id, library_dir, sizeof(library_dir)) != 0
+                || write_local_manifest(vc, library_dir, &m) != 0) {
+                vapor_manifest_free(&m);
+                return -1;
+            }
+            snprintf(rec.payload_dir, sizeof(rec.payload_dir), "%s", library_dir);
+        } else if (write_local_manifest(vc, payload, &m) != 0) {
+            vapor_manifest_free(&m);
+            return -1;
+        } else {
+            snprintf(rec.payload_dir, sizeof(rec.payload_dir), "%s", payload);
+        }
+        snprintf(rec.install_dir, sizeof(rec.install_dir), "%s", play_dir);
+        snprintf(rec.profile_launch, sizeof(rec.profile_launch), "%s", exec_rel);
+        assign_setup_state(&rec, VAPOR_SETUP_COMPLETED);
+        snprintf(rec.install_kind, sizeof(rec.install_kind), "%s",
+                 VAPOR_INSTALL_KIND_OS_PRODUCT);
+        capture_uninstall_recipe(&rec, play_dir);
+        if (!rec.product_dir[0]) {
+            snprintf(rec.product_dir, sizeof(rec.product_dir), "%s", play_dir);
+        }
+        vapor_plat_dir_size(play_dir, &rec.size_on_disk);
+        rec.installed_at = vapor_now_unix();
+        if (persist_install(vc, &rec) != 0) {
+            vapor_manifest_free(&m);
+            return -1;
+        }
+        if (was_mount) {
+            (void)vapor_plat_remove_tree(mount);
+        }
     }
     printf("tracked %s at %s (%s)\n", rec.name[0] ? rec.name : game_id,
            rec.install_dir, exec_rel);
@@ -2046,6 +2817,31 @@ vapor_setup_game(vapor_client *vc, const char *game_id)
     return setup_game_impl(vc, game_id, NULL);
 }
 
+static int
+progress_cb_cancel(void *ud)
+{
+    setup_hooks *h = (setup_hooks *)ud;
+
+    if (!h || !h->cb) {
+        return 0;
+    }
+    return h->cb(h->ud, 1, 2) != 0;
+}
+
+int
+vapor_setup_game_tracked(vapor_client *vc, const char *game_id,
+                         vapor_progress_fn cb, void *ud)
+{
+    setup_hooks hooks;
+
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.cb = cb;
+    hooks.ud = ud;
+    hooks.poll_cancel = cb ? progress_cb_cancel : NULL;
+    hooks.poll_ud = &hooks;
+    return setup_game_impl(vc, game_id, &hooks);
+}
+
 typedef struct {
     char path[VAPOR_PATH_MAX];
     int  score;
@@ -2058,19 +2854,22 @@ local_uninst_cb(const char *rel, const char *abs, void *ud)
     const char   *base;
     int           score = 0;
 
-    if (strchr(rel, '/')) {
-        return 0;
-    }
     base = path_basename(rel);
     if (vapor_str_eq_ci(base, "unins000.exe")) {
-        score = 3;
+        score = 300;
     } else if (vapor_str_has_prefix(base, "unins")
                && vapor_str_ends_with_ci(base, ".exe")) {
-        score = 2;
+        score = 200;
     } else if (vapor_str_eq_ci(base, "uninstall.exe")
                || vapor_str_eq_ci(base, "uninstaller.exe")) {
-        score = 1;
+        score = 100;
     }
+    if (score == 0) {
+        return 0;
+    }
+    /* Prefer a shallower match so the product-root unins000.exe wins over
+     * a helper copy nested under _CommonRedist or similar. */
+    score -= path_depth(rel);
     if (score > h->score && (size_t)strlen(abs) < sizeof(h->path)) {
         snprintf(h->path, sizeof(h->path), "%s", abs);
         h->score = score;
@@ -2098,6 +2897,77 @@ find_local_uninstaller(const char *dir, char *out, size_t outsz)
         return 1;
     }
     return 0;
+}
+
+static void
+copy_recipe_if_better(vapor_install *rec, const char *exe, const char *params,
+                      const char *product)
+{
+    if (!exe || !exe[0] || rec->uninstall_exe[0]) {
+        return;
+    }
+    snprintf(rec->uninstall_exe, sizeof(rec->uninstall_exe), "%s", exe);
+    if (params) {
+        snprintf(rec->uninstall_params, sizeof(rec->uninstall_params), "%s",
+                 params);
+    }
+    if (product && product[0] && !rec->product_dir[0]) {
+        snprintf(rec->product_dir, sizeof(rec->product_dir), "%s", product);
+    }
+}
+
+static void
+capture_uninstall_recipe(vapor_install *rec, const char *extra_dir)
+{
+    char        exe[VAPOR_PATH_MAX];
+    char        params[2048];
+    char        product[VAPOR_PATH_MAX];
+    const char *dirs[4];
+    int         i, n = 0;
+
+    if (rec->install_dir[0]) {
+        dirs[n++] = rec->install_dir;
+    }
+    if (rec->payload_dir[0]) {
+        dirs[n++] = rec->payload_dir;
+    }
+    if (extra_dir && extra_dir[0]) {
+        dirs[n++] = extra_dir;
+    }
+
+    for (i = 0; i < n && !rec->uninstall_exe[0]; i++) {
+        exe[0] = params[0] = product[0] = '\0';
+        if (vapor_plat_find_uninstall(rec->name, rec->game_id, dirs[i], exe,
+                                      sizeof(exe), params, sizeof(params),
+                                      product, sizeof(product))
+            == 0) {
+            copy_recipe_if_better(rec, exe, params, product);
+        }
+    }
+    if (!rec->uninstall_exe[0]) {
+        exe[0] = params[0] = product[0] = '\0';
+        if (vapor_plat_find_uninstall(rec->name, rec->game_id, NULL, exe,
+                                      sizeof(exe), params, sizeof(params),
+                                      product, sizeof(product))
+            == 0) {
+            copy_recipe_if_better(rec, exe, params, product);
+        }
+    }
+    for (i = 0; i < n && !rec->uninstall_exe[0]; i++) {
+        exe[0] = '\0';
+        if (find_local_uninstaller(dirs[i], exe, sizeof(exe)) == 0) {
+            copy_recipe_if_better(rec, exe, "", NULL);
+        }
+    }
+    if (!rec->product_dir[0]) {
+        if (extra_dir && extra_dir[0] && vapor_plat_is_dir(extra_dir)
+            && !dir_is_empty(extra_dir)) {
+            snprintf(rec->product_dir, sizeof(rec->product_dir), "%s", extra_dir);
+        } else if (rec->install_dir[0]) {
+            snprintf(rec->product_dir, sizeof(rec->product_dir), "%s",
+                     rec->install_dir);
+        }
+    }
 }
 
 static void
@@ -2139,12 +3009,112 @@ paths_same(const char *a, const char *b)
     return strcmp(aa, bb) == 0;
 }
 
-/* Refuse drive roots and the Windows directories themselves. A game folder
- * under Program Files is fine; Program Files is not. */
+static void
+merge_install_sidecar(vapor_install *rec)
+{
+    if (rec->payload_dir[0]) {
+        apply_install_sidecar_file(rec, rec->payload_dir);
+    }
+    if (rec->install_dir[0] && !paths_same(rec->install_dir, rec->payload_dir)) {
+        apply_install_sidecar_file(rec, rec->install_dir);
+    }
+}
+
 static int
-removal_is_safe(const char *path, const char *library)
+kind_is_os_product(const char *kind)
+{
+    return kind && strcmp(kind, VAPOR_INSTALL_KIND_OS_PRODUCT) == 0;
+}
+
+static void
+infer_install_kind(vapor_client *vc, vapor_install *rec)
+{
+    vapor_manifest      m;
+    const vapor_target *t;
+    char                exe[VAPOR_PATH_MAX];
+    char                params[2048];
+    char                listed[VAPOR_PATH_MAX];
+
+    if (rec->install_kind[0]) {
+        return;
+    }
+    if (rec->uninstall_exe[0] || rec->setup_pending) {
+        snprintf(rec->install_kind, sizeof(rec->install_kind), "%s",
+                 VAPOR_INSTALL_KIND_OS_PRODUCT);
+        return;
+    }
+    exe[0] = params[0] = listed[0] = '\0';
+    if (vapor_plat_find_uninstall(rec->name, rec->game_id, rec->install_dir, exe,
+                                  sizeof(exe), params, sizeof(params), listed,
+                                  sizeof(listed))
+            == 0
+        || vapor_plat_find_product_dir(rec->name, rec->game_id, listed,
+                                       sizeof(listed))
+               == 0) {
+        snprintf(rec->install_kind, sizeof(rec->install_kind), "%s",
+                 VAPOR_INSTALL_KIND_OS_PRODUCT);
+        return;
+    }
+    if (vapor_read_local_manifest(vc, rec->game_id, &m) == 0) {
+        t = vapor_manifest_pick_target(&m, vapor_host_platform(),
+                                       vapor_host_arch());
+        if ((t && t->runtime && t->runtime[0]
+             && strcmp(t->runtime, "native") != 0)
+            || looks_dhewm3_payload(rec->install_dir, rec->game_id,
+                                    t && t->exec ? t->exec : "")) {
+            snprintf(rec->install_kind, sizeof(rec->install_kind), "%s",
+                     VAPOR_INSTALL_KIND_RUNTIME);
+        } else {
+            snprintf(rec->install_kind, sizeof(rec->install_kind), "%s",
+                     VAPOR_INSTALL_KIND_PORTABLE);
+        }
+        vapor_manifest_free(&m);
+        return;
+    }
+    snprintf(rec->install_kind, sizeof(rec->install_kind), "%s",
+             VAPOR_INSTALL_KIND_PORTABLE);
+}
+
+static int
+path_is_under(const char *path, const char *root)
+{
+    char   p[VAPOR_PATH_MAX], r[VAPOR_PATH_MAX];
+    size_t i, n;
+
+    if (!path || !root || !path[0] || !root[0]) {
+        return 0;
+    }
+    snprintf(p, sizeof(p), "%s", path);
+    snprintf(r, sizeof(r), "%s", root);
+    vapor_plat_native_path(p);
+    vapor_plat_native_path(r);
+    trim_trailing_sep(p);
+    trim_trailing_sep(r);
+    for (i = 0; p[i]; i++) {
+        if (p[i] >= 'A' && p[i] <= 'Z') {
+            p[i] = (char)(p[i] - 'A' + 'a');
+        }
+    }
+    for (i = 0; r[i]; i++) {
+        if (r[i] >= 'A' && r[i] <= 'Z') {
+            r[i] = (char)(r[i] - 'A' + 'a');
+        }
+    }
+    n = strlen(r);
+    if (n == 0 || strncmp(p, r, n) != 0) {
+        return 0;
+    }
+    return p[n] == '\0' || p[n] == '/' || p[n] == '\\';
+}
+
+/* Refuse drive roots and the Windows directories themselves. A game folder
+ * under Program Files is fine; Program Files is not. Shared emulator
+ * runtimes under {data_dir}/runtimes are never deleted with a game. */
+static int
+removal_is_safe(const char *path, const char *library, const char *data_dir)
 {
     char        tmp[VAPOR_PATH_MAX];
+    char        runtimes[VAPOR_PATH_MAX];
     const char *base;
 
     if (!path || !path[0]) {
@@ -2157,6 +3127,11 @@ removal_is_safe(const char *path, const char *library)
         return 0;
     }
     if (library && library[0] && paths_same(tmp, library)) {
+        return 0;
+    }
+    if (data_dir && data_dir[0]
+        && join(runtimes, sizeof(runtimes), data_dir, "runtimes") == 0
+        && path_is_under(tmp, runtimes)) {
         return 0;
     }
     base = path_basename(tmp);
@@ -2181,7 +3156,7 @@ remove_install_tree(vapor_client *vc, const char *path)
     snprintf(native, sizeof(native), "%s", path);
     vapor_plat_native_path(native);
     trim_trailing_sep(native);
-    if (!removal_is_safe(native, vc->cfg.library_dir)) {
+    if (!removal_is_safe(native, vc->cfg.library_dir, vc->data_dir)) {
         return 0;
     }
     if (!vapor_plat_exists(native)) {
@@ -2195,8 +3170,45 @@ remove_install_tree(vapor_client *vc, const char *path)
     return 0;
 }
 
-int
-vapor_uninstall_game(vapor_client *vc, const char *game_id)
+static int
+resolve_rel_uninstall(const char *rel, const char *const *roots, int nroots,
+                      char *exe, size_t exesz, char *params, size_t paramsz)
+{
+    int i;
+
+    if (!rel || !rel[0]) {
+        return 1;
+    }
+    for (i = 0; i < nroots; i++) {
+        char            path[VAPOR_PATH_MAX];
+        vapor_inst_kind kind;
+
+        if (!rel_file_exists(roots[i], rel)) {
+            continue;
+        }
+        if (join(path, sizeof(path), roots[i], rel) != 0) {
+            continue;
+        }
+        vapor_plat_native_path(path);
+        if ((size_t)snprintf(exe, exesz, "%s", path) >= exesz) {
+            continue;
+        }
+        kind = vapor_inst_detect(path, roots[i]);
+        if (vapor_inst_uninstall_params(kind, path, params, paramsz) != 0) {
+            /* Inno/NSIS setup.exe and InstallShield have no safe uninstall
+             * switch here; skip them instead of launching the installer. */
+            exe[0] = '\0';
+            params[0] = '\0';
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+static int
+uninstall_game_impl(vapor_client *vc, const char *game_id, vapor_progress_fn cb,
+                    void *ud)
 {
     vapor_install rec;
     char          library_dir[VAPOR_PATH_MAX];
@@ -2205,24 +3217,98 @@ vapor_uninstall_game(vapor_client *vc, const char *game_id)
     char          product_dir[VAPOR_PATH_MAX];
     char          cwd[VAPOR_PATH_MAX];
     int           exit_code = 0;
+    int           is_os;
 
     if (vapor_db_get_install(vc, game_id, &rec) != 0) {
         vapor_client_set_error(vc, "%s is not installed", game_id);
         return -1;
     }
+    /* A shortcut only remembers a path. Forgetting it must not walk that
+     * directory, run an uninstaller, or delete anything. */
+    if (vapor_install_is_external(&rec)) {
+        if (vapor_db_forget_install(vc, game_id) != 0) {
+            vapor_client_set_error(vc, "could not update the local database");
+            return -1;
+        }
+        printf("removed the library shortcut for %s; left %s in place\n",
+               rec.name[0] ? rec.name : game_id,
+               rec.launch_exe[0] ? rec.launch_exe : rec.install_dir);
+        return 0;
+    }
     if (install_dir_for(vc, game_id, library_dir, sizeof(library_dir)) != 0) {
         return -1;
     }
+    merge_install_sidecar(&rec);
+    infer_install_kind(vc, &rec);
+    is_os = kind_is_os_product(rec.install_kind);
 
     exe[0] = params[0] = product_dir[0] = '\0';
-    if (vapor_plat_find_uninstall(rec.name, rec.game_id, rec.install_dir, exe,
-                                  sizeof(exe), params, sizeof(params),
-                                  product_dir, sizeof(product_dir))
-        != 0) {
-        if (find_local_uninstaller(rec.install_dir, exe, sizeof(exe)) != 0
-            && find_local_uninstaller(rec.payload_dir, exe, sizeof(exe)) != 0
-            && find_local_uninstaller(library_dir, exe, sizeof(exe)) != 0) {
-            exe[0] = '\0';
+    if (rec.product_dir[0]) {
+        snprintf(product_dir, sizeof(product_dir), "%s", rec.product_dir);
+    }
+    if (is_os && rec.profile_uninstall[0]) {
+        const char *roots[4];
+
+        roots[0] = rec.product_dir;
+        roots[1] = rec.install_dir;
+        roots[2] = rec.payload_dir;
+        roots[3] = library_dir;
+        if (resolve_rel_uninstall(rec.profile_uninstall, roots, 4, exe,
+                                  sizeof(exe), params, sizeof(params))
+            == 0) {
+            printf("using profile uninstaller %s\n", exe);
+        }
+    }
+    if (!exe[0] && rec.uninstall_exe[0]) {
+        snprintf(exe, sizeof(exe), "%s", rec.uninstall_exe);
+        snprintf(params, sizeof(params), "%s", rec.uninstall_params);
+    }
+
+    /* portable / runtime: never run a vendor uninstaller. os_product (and
+     * older installs inferred as such) use the recorded recipe, then
+     * rediscover by InstallLocation / DisplayName / local unins*.exe. */
+    if (is_os && !exe[0]) {
+        capture_uninstall_recipe(&rec, rec.product_dir[0] ? rec.product_dir
+                                                          : NULL);
+        if (rec.uninstall_exe[0]) {
+            snprintf(exe, sizeof(exe), "%s", rec.uninstall_exe);
+            snprintf(params, sizeof(params), "%s", rec.uninstall_params);
+        }
+        if (!product_dir[0] && rec.product_dir[0]) {
+            snprintf(product_dir, sizeof(product_dir), "%s", rec.product_dir);
+        }
+        if (!exe[0]) {
+            if (find_local_uninstaller(rec.install_dir, exe, sizeof(exe)) != 0
+                && find_local_uninstaller(rec.payload_dir, exe, sizeof(exe))
+                       != 0
+                && find_local_uninstaller(library_dir, exe, sizeof(exe)) != 0) {
+                exe[0] = '\0';
+            }
+        }
+    }
+    if (is_os && !exe[0] && rec.setup_rel[0]) {
+        const char *roots[3];
+
+        roots[0] = rec.payload_dir;
+        roots[1] = library_dir;
+        roots[2] = rec.install_dir;
+        if (resolve_rel_uninstall(rec.setup_rel, roots, 3, exe, sizeof(exe),
+                                  params, sizeof(params))
+            == 0) {
+            printf("using the game installer to uninstall %s\n", exe);
+        } else {
+            exe[0] = params[0] = '\0';
+        }
+    }
+
+    if (is_os && exe[0] && !params[0]) {
+        char            dir[VAPOR_PATH_MAX];
+        vapor_inst_kind kind;
+
+        path_dirname(exe, dir, sizeof(dir));
+        kind = vapor_inst_detect(exe, dir);
+        if (vapor_inst_uninstall_params(kind, exe, params, sizeof(params)) != 0) {
+            params[0] = '\0';
         }
     }
 
@@ -2231,7 +3317,7 @@ vapor_uninstall_game(vapor_client *vc, const char *game_id)
      * that entry. InstallShield also publishes a second key with the same
      * name and an empty uninstall command; the real command is the other
      * key (IDriver.exe /M{GUID}). */
-    if (!exe[0]) {
+    if (is_os && !exe[0]) {
         char listed[VAPOR_PATH_MAX];
 
         listed[0] = '\0';
@@ -2247,7 +3333,7 @@ vapor_uninstall_game(vapor_client *vc, const char *game_id)
         }
     }
 
-    if (exe[0]) {
+    if (is_os && exe[0]) {
         char still_exe[VAPOR_PATH_MAX];
         char still_params[2048];
         char still_dir[VAPOR_PATH_MAX];
@@ -2256,10 +3342,29 @@ vapor_uninstall_game(vapor_client *vc, const char *game_id)
         printf("running uninstaller %s%s%s\n", exe, params[0] ? " " : "",
                params);
         fflush(stdout);
-        if (vapor_plat_run_ui(exe, cwd, params[0] ? params : NULL, &exit_code)
-            != 0) {
-            vapor_client_set_error(vc, "could not start uninstaller %s", exe);
-            return -1;
+        {
+            setup_hooks hooks;
+            int         src;
+
+            memset(&hooks, 0, sizeof(hooks));
+            hooks.cb = cb;
+            hooks.ud = ud;
+            hooks.poll_cancel = cb ? progress_cb_cancel : NULL;
+            hooks.poll_ud = &hooks;
+            src = vapor_plat_run_ui(exe, cwd, params[0] ? params : NULL,
+                                    &exit_code, cb ? hooks_cancel : NULL,
+                                    &hooks);
+            if (src > 0) {
+                vapor_client_set_error(vc,
+                                       "uninstaller for %s was cancelled; the "
+                                       "game was left installed",
+                                       rec.name[0] ? rec.name : game_id);
+                return -1;
+            }
+            if (src != 0) {
+                vapor_client_set_error(vc, "could not start uninstaller %s", exe);
+                return -1;
+            }
         }
         /* 3010 is Windows' "success, reboot required". */
         if (exit_code != 0 && exit_code != 3010) {
@@ -2271,7 +3376,9 @@ vapor_uninstall_game(vapor_client *vc, const char *game_id)
         }
         /* The maintenance window can return 0 on Cancel or Repair. */
         still_exe[0] = still_params[0] = still_dir[0] = '\0';
-        if (vapor_plat_find_uninstall(rec.name, rec.game_id, rec.install_dir,
+        if (vapor_plat_find_uninstall(rec.name, rec.game_id,
+                                      rec.install_dir[0] ? rec.install_dir
+                                                         : product_dir,
                                       still_exe, sizeof(still_exe), still_params,
                                       sizeof(still_params), still_dir,
                                       sizeof(still_dir))
@@ -2285,9 +3392,18 @@ vapor_uninstall_game(vapor_client *vc, const char *game_id)
         }
     }
 
+    {
+        char mount[VAPOR_PATH_MAX];
+
+        if (mount_dir_for(vc, game_id, mount, sizeof(mount)) == 0
+            && remove_install_tree(vc, mount) != 0) {
+            return -1;
+        }
+    }
     if (remove_install_tree(vc, product_dir) != 0
         || remove_install_tree(vc, rec.install_dir) != 0
         || remove_install_tree(vc, rec.payload_dir) != 0
+        || remove_install_tree(vc, rec.product_dir) != 0
         || remove_install_tree(vc, library_dir) != 0) {
         return -1;
     }
@@ -2303,6 +3419,19 @@ vapor_uninstall_game(vapor_client *vc, const char *game_id)
 }
 
 int
+vapor_uninstall_game(vapor_client *vc, const char *game_id)
+{
+    return uninstall_game_impl(vc, game_id, NULL, NULL);
+}
+
+int
+vapor_uninstall_game_cancellable(vapor_client *vc, const char *game_id,
+                                 vapor_progress_fn cb, void *ud)
+{
+    return uninstall_game_impl(vc, game_id, cb, ud);
+}
+
+int
 vapor_verify_install(vapor_client *vc, const char *game_id)
 {
     vapor_manifest      m;
@@ -2315,6 +3444,18 @@ vapor_verify_install(vapor_client *vc, const char *game_id)
     if (vapor_db_get_install(vc, game_id, &rec) != 0) {
         vapor_client_set_error(vc, "%s is not installed", game_id);
         return -1;
+    }
+    if (vapor_install_is_external(&rec)) {
+        if (rec.launch_exe[0] && vapor_plat_exists(rec.launch_exe)
+            && !vapor_plat_is_dir(rec.launch_exe)) {
+            printf("  shortcut %s\n", rec.launch_exe);
+            return 0;
+        }
+        printf("  shortcut target is missing: %s\n",
+               rec.launch_exe[0] ? rec.launch_exe : "(none)");
+        vapor_client_set_error(vc, "the program for %s is missing",
+                               rec.name[0] ? rec.name : game_id);
+        return 1;
     }
     if (install_dir_for(vc, game_id, install_dir, sizeof(install_dir)) != 0) {
         return -1;
