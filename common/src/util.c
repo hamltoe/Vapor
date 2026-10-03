@@ -6,6 +6,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "miniz.h"
 #include "vapor/protocol.h"
 
 int
@@ -425,6 +426,135 @@ vapor_read_file(const char *path, size_t *out_len)
         *out_len = got;
     }
     return buf;
+}
+
+static uint16_t
+u16le(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t
+u32le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16)
+         | ((uint32_t)p[3] << 24);
+}
+
+const char *
+vapor_pe_arch_mem(const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t       lfanew;
+    uint16_t       machine;
+
+    if (!p || len < 0x40 || p[0] != 'M' || p[1] != 'Z') {
+        return NULL;
+    }
+    lfanew = u32le(p + 0x3c);
+    if (lfanew < 0x40 || (size_t)lfanew + 6 > len) {
+        return NULL;
+    }
+    if (p[lfanew] != 'P' || p[lfanew + 1] != 'E' || p[lfanew + 2] != 0
+        || p[lfanew + 3] != 0) {
+        return NULL;
+    }
+    machine = u16le(p + lfanew + 4);
+    if (machine == 0x14c) {
+        return "x86";
+    }
+    if (machine == 0x8664) {
+        return "x86_64";
+    }
+    return NULL;
+}
+
+const char *
+vapor_pe_arch_file(const char *path)
+{
+    FILE    *f;
+    uint8_t  buf[65536];
+    size_t   n;
+    const char *arch;
+
+    if (!path || !path[0]) {
+        return NULL;
+    }
+    f = fopen(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    n = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    arch = vapor_pe_arch_mem(buf, n);
+    return arch;
+}
+
+typedef struct {
+    uint8_t *buf;
+    size_t   cap;
+    size_t   n;
+} pe_grab;
+
+static size_t
+pe_grab_write(void *opaque, mz_uint64 file_ofs, const void *buf, size_t n)
+{
+    pe_grab *g = (pe_grab *)opaque;
+
+    if (file_ofs >= g->cap) {
+        return 0;
+    }
+    if (n > g->cap - (size_t)file_ofs) {
+        n = g->cap - (size_t)file_ofs;
+    }
+    memcpy(g->buf + (size_t)file_ofs, buf, n);
+    if ((size_t)file_ofs + n > g->n) {
+        g->n = (size_t)file_ofs + n;
+    }
+    return g->n >= g->cap ? 0 : n;
+}
+
+const char *
+vapor_pe_arch_zip(const char *zip_path, const char *entry)
+{
+    mz_zip_archive zip;
+    char           norm[1024];
+    uint8_t        buf[65536];
+    pe_grab        grab;
+    int            index;
+    size_t         i, n;
+    const char    *arch;
+
+    if (!zip_path || !entry || !entry[0]) {
+        return NULL;
+    }
+    n = strlen(entry);
+    if (n >= sizeof(norm)) {
+        return NULL;
+    }
+    for (i = 0; i < n; i++) {
+        norm[i] = entry[i] == '\\' ? '/' : entry[i];
+    }
+    norm[n] = '\0';
+
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_file(&zip, zip_path, 0)) {
+        return NULL;
+    }
+    index = mz_zip_reader_locate_file(&zip, norm, NULL, 0);
+    if (index < 0) {
+        mz_zip_reader_end(&zip);
+        return NULL;
+    }
+    memset(buf, 0, sizeof(buf));
+    grab.buf = buf;
+    grab.cap = sizeof(buf);
+    grab.n = 0;
+    (void)mz_zip_reader_extract_to_callback(&zip, (mz_uint)index, pe_grab_write,
+                                            &grab, 0);
+    mz_zip_reader_end(&zip);
+    arch = vapor_pe_arch_mem(buf, grab.n);
+    return arch;
 }
 
 void

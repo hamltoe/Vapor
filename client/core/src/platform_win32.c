@@ -16,6 +16,23 @@
 #include "vapor/buf.h"
 #include "vapor/util.h"
 
+#if defined(VAPOR_TARGET_XP)
+/* SHGetKnownFolderPath and the LOCALAPPDATA variable are Vista. CSIDL_LOCAL_APPDATA
+ * is "Documents and Settings\<user>\Local Settings\Application Data" on XP. */
+static int
+profile_folder(int csidl, char *out, size_t outsz)
+{
+    char buf[MAX_PATH];
+
+    if (SHGetFolderPathA(NULL, csidl, NULL, SHGFP_TYPE_CURRENT, buf) != S_OK) {
+        return -1;
+    }
+    if ((size_t)snprintf(out, outsz, "%s", buf) >= outsz) {
+        return -1;
+    }
+    return 0;
+}
+#else
 static int
 known_folder(const KNOWNFOLDERID *id, char *out, size_t outsz)
 {
@@ -29,18 +46,37 @@ known_folder(const KNOWNFOLDERID *id, char *out, size_t outsz)
     CoTaskMemFree(wpath);
     return n > 0 ? 0 : -1;
 }
+#endif
+
+static int
+local_appdata(char *out, size_t outsz)
+{
+#if defined(VAPOR_TARGET_XP)
+    return profile_folder(CSIDL_LOCAL_APPDATA, out, outsz);
+#else
+    if (known_folder(&FOLDERID_LocalAppData, out, outsz) == 0) {
+        return 0;
+    }
+    {
+        const char *env = getenv("LOCALAPPDATA");
+        if (!env || !*env) {
+            return -1;
+        }
+        if ((size_t)snprintf(out, outsz, "%s", env) >= outsz) {
+            return -1;
+        }
+    }
+    return 0;
+#endif
+}
 
 int
 vapor_plat_data_dir(char *out, size_t outsz)
 {
     char base[VAPOR_WIN_PATH];
 
-    if (known_folder(&FOLDERID_LocalAppData, base, sizeof(base)) != 0) {
-        const char *env = getenv("LOCALAPPDATA");
-        if (!env || !*env) {
-            return -1;
-        }
-        snprintf(base, sizeof(base), "%s", env);
+    if (local_appdata(base, sizeof(base)) != 0) {
+        return -1;
     }
     snprintf(out, outsz, "%s\\Vapor", base);
     return 0;
@@ -53,12 +89,8 @@ vapor_plat_default_library_dir(char *out, size_t outsz)
 
     /* Games go under the user profile, not Program Files: no elevation, and no
      * fighting with Windows' installer redirection. */
-    if (known_folder(&FOLDERID_LocalAppData, base, sizeof(base)) != 0) {
-        const char *env = getenv("LOCALAPPDATA");
-        if (!env || !*env) {
-            return -1;
-        }
-        snprintf(base, sizeof(base), "%s", env);
+    if (local_appdata(base, sizeof(base)) != 0) {
+        return -1;
     }
     snprintf(out, outsz, "%s\\Vapor\\Games", base);
     return 0;
@@ -1058,8 +1090,13 @@ find_product_dir_ex(const char *name, const char *id, char *out, size_t outsz,
         return 0;
     }
     pf[0] = pfx86[0] = '\0';
+#if defined(VAPOR_TARGET_XP)
+    /* 32-bit XP has one Program Files directory. */
+    (void)profile_folder(CSIDL_PROGRAM_FILES, pf, sizeof(pf));
+#else
     (void)known_folder(&FOLDERID_ProgramFiles, pf, sizeof(pf));
     (void)known_folder(&FOLDERID_ProgramFilesX86, pfx86, sizeof(pfx86));
+#endif
     if ((pf[0]
          && scan_program_files(pf, name, id, out, outsz, require_files) == 0)
         || (pfx86[0]
@@ -1521,6 +1558,28 @@ rva_to_off(const pe_section *secs, int nsec, unsigned rva)
     return -1;
 }
 
+/* GetSystemWow64DirectoryA is not exported on 32-bit XP. A static import
+ * would stop the process from loading, so resolve it when the DLL has it. */
+typedef UINT (WINAPI *vapor_wow64_dir_fn)(LPSTR, UINT);
+
+static vapor_wow64_dir_fn
+wow64_system_dir(void)
+{
+    static vapor_wow64_dir_fn fn;
+    static int                tried;
+
+    if (!tried) {
+        HMODULE kernel = GetModuleHandleA("kernel32.dll");
+
+        tried = 1;
+        if (kernel) {
+            fn = (vapor_wow64_dir_fn)GetProcAddress(kernel,
+                                                    "GetSystemWow64DirectoryA");
+        }
+    }
+    return fn;
+}
+
 static int
 dll_resolved(const char *exe_dir, const char *dll)
 {
@@ -1556,11 +1615,18 @@ dll_resolved(const char *exe_dir, const char *dll)
         && file_exists_non_dir(path)) {
         return 1;
     }
-    n = GetSystemWow64DirectoryA(dir, MAX_PATH);
-    if (n > 0 && n < MAX_PATH
-        && snprintf(path, sizeof(path), "%s\\%s", dir, base) < (int)sizeof(path)
-        && file_exists_non_dir(path)) {
-        return 1;
+    {
+        vapor_wow64_dir_fn wow64 = wow64_system_dir();
+
+        if (wow64) {
+            n = wow64(dir, MAX_PATH);
+            if (n > 0 && n < MAX_PATH
+                && snprintf(path, sizeof(path), "%s\\%s", dir, base)
+                       < (int)sizeof(path)
+                && file_exists_non_dir(path)) {
+                return 1;
+            }
+        }
     }
     return 0;
 }

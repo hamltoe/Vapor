@@ -13,7 +13,8 @@
  * the platform layer does not depend on the public client header. */
 #define VAPOR_WIN_PATH 1024
 
-/* Per-user state directory: %LOCALAPPDATA%\Vapor or $XDG_DATA_HOME/vapor. */
+/* Per-user state directory: %LOCALAPPDATA%\Vapor, the XP
+ * "Local Settings\Application Data" folder, or $XDG_DATA_HOME/vapor. */
 int vapor_plat_data_dir(char *out, size_t outsz);
 /* Default place to install games, which the user can override in config. */
 int vapor_plat_default_library_dir(char *out, size_t outsz);

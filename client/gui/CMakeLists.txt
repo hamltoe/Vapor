@@ -26,6 +26,12 @@ else()
         ${VAPOR_WARN_FLAGS} -Wno-unused-function -Wno-sign-compare)
 endif()
 
+if(VAPOR_TARGET_XP)
+    # The directory-level link line is console:5.01 so the CLI keeps a console.
+    # The GUI is a windowed image; GNU ld uses the last subsystem it sees.
+    target_link_options(vapor-gui PRIVATE "-Wl,--subsystem,windows:5.01")
+endif()
+
 if(WIN32 AND VAPOR_SDL2_DLL)
     add_custom_command(TARGET vapor-gui POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

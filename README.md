@@ -86,6 +86,35 @@ vapor.exe  vapor-gui.exe  vapor-selftest.exe
 Pass `-NoGui` only if you must build the CLI without SDL2. Re-run
 `vendor-deps.ps1` if the GUI is skipped because `third_party\sdl2` is missing.
 
+### Windows XP Professional SP3 (32-bit)
+
+A second client build targets Windows XP SP3. It is not the Visual Studio
+binary: XP cannot load the VS 2022 CRT, and it cannot run a 64-bit image.
+Install the MSYS2 package `mingw-w64-i686-gcc` (the msvcrt `mingw32`
+toolchain, not UCRT), then:
+
+```
+powershell -File scripts/vendor-deps.ps1
+powershell -File scripts/build-windows-xp.ps1
+```
+
+Binaries land in `build-windows-xp\bin\`. Copy that whole directory.
+`vapor-gui.exe` needs `SDL2.dll` in the same folder; the GUI is linked
+against SDL 2.0.22 built from source. Pass `-NoGui` to skip that and build
+`vapor.exe` only. The target CPU is an Athlon XP (SSE and 3DNow!, no
+SSE2). Vapor and the C runtime it links are compiled `-march=i686` so a
+Pentium 4 instruction is not in the image.
+
+That client talks to vapord over `http://` on the LAN. HTTPS is refused:
+XP's TLS stack stops at TLS 1.0. Paths and account names have to fit the
+system code page (XP has no UTF-8 ANSI code page). A game whose executable
+is actually 64-bit will not launch. Doom 3's dhewm3 port is not downloaded
+for you; put `dhewm3.exe` in the install folder or under
+`runtimes\dhewm3` in the Vapor data directory. Portable zip, ISO, and Wise
+installs are the reliable path. Installers that require Vista, UAC, or a
+modern Visual C++ runtime will not run. The GUI needs a working OpenGL
+driver; if the window cannot start, use `vapor.exe`.
+
 A Windows machine can still host the **server** by building it inside
 WSL with the Linux steps above. After Ubuntu is installed, start vapord
 any of these ways:

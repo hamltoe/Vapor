@@ -35,9 +35,10 @@ target_link_libraries(vapor_core PUBLIC
 target_compile_options(vapor_core PRIVATE ${VAPOR_WARN_FLAGS})
 
 if(WIN32)
-    # winhttp and shell32/ole32 (SHGetKnownFolderPath) ship with the Windows
-    # SDK, so the Windows client has no third-party runtime dependency.
-    target_link_libraries(vapor_core PUBLIC winhttp shell32 ole32 comdlg32)
+    # WinHTTP, shell32 (known/profile folders), ole32, and the common dialog
+    # ship with the Windows SDK. advapi32 is the registry API; MinGW does not
+    # pull it in the way the MSVC default libraries do.
+    target_link_libraries(vapor_core PUBLIC winhttp shell32 ole32 comdlg32 advapi32)
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(CURL REQUIRED IMPORTED_TARGET libcurl)

@@ -56,6 +56,13 @@ int vapor_glob_match(const char *pattern, const char *str);
 /* Reads a whole file into a malloc'd NUL-terminated buffer. */
 char *vapor_read_file(const char *path, size_t *out_len);
 
+/* "x86" or "x86_64" when the bytes are a PE with that machine type.
+ * NULL when they are not a recognized PE (DOS stub, ELF, truncated). */
+const char *vapor_pe_arch_mem(const void *data, size_t len);
+const char *vapor_pe_arch_file(const char *path);
+/* Same, for one entry inside a zip. `entry` is the archive path. */
+const char *vapor_pe_arch_zip(const char *zip_path, const char *entry);
+
 /* Overwrites a buffer that held a secret. Written so the compiler cannot treat
  * the store as dead and remove it, which plain memset is allowed to be. */
 void vapor_secure_zero(void *p, size_t n);

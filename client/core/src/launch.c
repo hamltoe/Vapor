@@ -279,7 +279,9 @@ find_dhewm3(vapor_client *vc, const vapor_install *rec, char *out, size_t outsz)
 }
 
 /* Official GPL Windows build. dhewm3 is the id Tech 4 runtime for retail
- * Doom 3 paks; Vapor never runs the SafeDisc wrapper. */
+ * Doom 3 paks; Vapor never runs the SafeDisc wrapper. The XP client cannot
+ * fetch it (GitHub requires TLS 1.2). */
+#if defined(_WIN32) && !defined(VAPOR_TARGET_XP)
 #define DHEWM3_WIN_URL \
     "https://github.com/dhewm/dhewm3/releases/download/1.5.5/dhewm3-1.5.5_win32.zip"
 
@@ -406,6 +408,7 @@ extract_zip_tree(vapor_client *vc, const char *zip_path, const char *dest_dir)
     mz_zip_reader_end(&zip);
     return 0;
 }
+#endif /* modern Windows: GitHub dhewm3 download */
 
 typedef struct {
     char path[VAPOR_PATH_MAX];
@@ -449,18 +452,20 @@ static int
 ensure_dhewm3(vapor_client *vc, const vapor_install *rec, char *out,
               size_t outsz)
 {
-    char runtime[VAPOR_PATH_MAX];
-    char zip_path[VAPOR_PATH_MAX];
-
     if (find_dhewm3(vc, rec, out, outsz) == 0) {
         return 0;
     }
-#if !defined(_WIN32)
+#if !defined(_WIN32) || defined(VAPOR_TARGET_XP)
+    /* The XP client cannot fetch the GitHub release: that host requires
+     * TLS 1.2, and XP SChannel stops at TLS 1.0. */
     vapor_client_set_error(vc,
                            "this Doom 3 install needs dhewm3 (Windows blocked "
                            "SafeDisc). Install dhewm3 and try Play again");
     return -1;
 #else
+    char runtime[VAPOR_PATH_MAX];
+    char zip_path[VAPOR_PATH_MAX];
+
     if (path_join(runtime, sizeof(runtime), vc->data_dir, "runtimes/dhewm3") != 0
         || path_join(zip_path, sizeof(zip_path), vc->data_dir,
                      "runtimes/dhewm3.zip")
@@ -704,6 +709,27 @@ steam_appid_for_exe(const char *exe, char *out_appid, size_t outsz,
     return 0;
 }
 
+/* A 32-bit host cannot start a PE32+ image. Older manifests label every
+ * Windows target x86_64, so this is what tells Play apart from a missing file. */
+static int
+refuse_64bit_exe(vapor_client *vc, const char *path)
+{
+    const char *pe;
+
+    if (!vapor_str_eq_ci(vapor_host_arch(), "x86")) {
+        return 0;
+    }
+    pe = vapor_pe_arch_file(path);
+    if (pe && strcmp(pe, "x86_64") == 0) {
+        vapor_client_set_error(vc,
+                               "%s is a 64-bit program and cannot run on "
+                               "32-bit Windows",
+                               path);
+        return -1;
+    }
+    return 0;
+}
+
 /* The user pointed at this program. Do not read a manifest, do not rewrite
  * the directory, and do not swap in a source port. Returns 1 when Steam
  * starts the game and this process does not wait for it. */
@@ -819,6 +845,9 @@ launch_external(vapor_client *vc, const vapor_install *rec, int *out_exit)
     printf("launching %s\n", rec->name[0] ? rec->name : rec->game_id);
     fflush(stdout);
 
+    if (refuse_64bit_exe(vc, exec_path) != 0) {
+        goto cleanup;
+    }
     started = vapor_now_unix();
     if (vapor_plat_run(exec_path, argv, cwd_path, NULL, 0, &exit_code) != 0) {
         vapor_client_set_error(vc, "could not start %s", exec_path);
@@ -1261,6 +1290,9 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
      * our own output buffered would interleave it out of order. */
     fflush(stdout);
 
+    if (refuse_64bit_exe(vc, use_dosbox ? dosbox_exe : exec_path) != 0) {
+        goto cleanup;
+    }
     started = vapor_now_unix();
     if (vapor_plat_run(use_dosbox ? dosbox_exe : exec_path, argv, cwd_path, env,
                        nenv, &exit_code)

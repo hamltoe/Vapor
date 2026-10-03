@@ -596,24 +596,56 @@ done:
     return text;
 }
 
+static int
+target_platform(const vapor_target *t, const char *platform)
+{
+    return t->platform && platform && vapor_str_eq_ci(t->platform, platform);
+}
+
 const vapor_target *
 vapor_manifest_pick_target(const vapor_manifest *m, const char *platform,
                            const char *arch)
 {
     size_t i;
+    int    windows = platform && vapor_str_eq_ci(platform, "windows");
+
+    if (!m || !platform) {
+        return NULL;
+    }
 
     for (i = 0; i < m->ntargets; i++) {
         const vapor_target *t = &m->targets[i];
-        if (vapor_str_eq_ci(t->platform, platform)
-            && t->arch && vapor_str_eq_ci(t->arch, arch)) {
+        if (target_platform(t, platform) && t->arch && arch
+            && vapor_str_eq_ci(t->arch, arch)) {
             return t;
+        }
+    }
+    /* 64-bit Windows runs a 32-bit game through WOW64. */
+    if (windows && arch && vapor_str_eq_ci(arch, "x86_64")) {
+        for (i = 0; i < m->ntargets; i++) {
+            const vapor_target *t = &m->targets[i];
+            if (target_platform(t, platform) && t->arch
+                && vapor_str_eq_ci(t->arch, "x86")) {
+                return t;
+            }
         }
     }
     /* A target that does not pin an arch is treated as "any". */
     for (i = 0; i < m->ntargets; i++) {
         const vapor_target *t = &m->targets[i];
-        if (vapor_str_eq_ci(t->platform, platform) && !t->arch) {
+        if (target_platform(t, platform) && !t->arch) {
             return t;
+        }
+    }
+    /* Older discovery stamped every Windows exe x86_64. A 32-bit host still
+     * tries that label; a real PE32+ image is refused at launch. */
+    if (windows && arch && vapor_str_eq_ci(arch, "x86")) {
+        for (i = 0; i < m->ntargets; i++) {
+            const vapor_target *t = &m->targets[i];
+            if (target_platform(t, platform) && t->arch
+                && vapor_str_eq_ci(t->arch, "x86_64")) {
+                return t;
+            }
         }
     }
     return NULL;

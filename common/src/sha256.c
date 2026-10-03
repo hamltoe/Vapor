@@ -15,6 +15,14 @@
 #define SSIG0(x)      (ROR(x, 7) ^ ROR(x, 18) ^ ((x) >> 3))
 #define SSIG1(x)      (ROR(x, 17) ^ ROR(x, 19) ^ ((x) >> 10))
 
+/* GCC 16's pentium4 default vectorizes this file with SSE2 at -O3. The XP
+ * client has to run on i686 and produce the same digest as the server. */
+#if defined(VAPOR_TARGET_XP) && defined(__GNUC__)
+#define VAPOR_SHA256_FN __attribute__((optimize("O1,no-tree-vectorize"), noinline))
+#else
+#define VAPOR_SHA256_FN
+#endif
+
 static const uint32_t K[64] = {
     0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu,
     0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u, 0xd807aa98u, 0x12835b01u,
@@ -31,7 +39,7 @@ static const uint32_t K[64] = {
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
 };
 
-static void
+VAPOR_SHA256_FN static void
 sha256_transform(vapor_sha256 *c, const uint8_t block[64])
 {
     uint32_t w[64], a, b, d, e, f, g, h, t1, t2, cc;
@@ -61,7 +69,7 @@ sha256_transform(vapor_sha256 *c, const uint8_t block[64])
     c->state[4] += e; c->state[5] += f; c->state[6] += g; c->state[7] += h;
 }
 
-void
+VAPOR_SHA256_FN void
 vapor_sha256_init(vapor_sha256 *c)
 {
     c->state[0] = 0x6a09e667u; c->state[1] = 0xbb67ae85u;
@@ -70,9 +78,10 @@ vapor_sha256_init(vapor_sha256 *c)
     c->state[6] = 0x1f83d9abu; c->state[7] = 0x5be0cd19u;
     c->bitlen = 0;
     c->blocklen = 0;
+    memset(c->block, 0, sizeof c->block);
 }
 
-void
+VAPOR_SHA256_FN void
 vapor_sha256_update(vapor_sha256 *c, const void *data, size_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
@@ -95,7 +104,7 @@ vapor_sha256_update(vapor_sha256 *c, const void *data, size_t len)
     }
 }
 
-void
+VAPOR_SHA256_FN void
 vapor_sha256_final(vapor_sha256 *c, uint8_t out[VAPOR_SHA256_DIGEST_LEN])
 {
     size_t   i = c->blocklen;
@@ -128,7 +137,7 @@ vapor_sha256_final(vapor_sha256 *c, uint8_t out[VAPOR_SHA256_DIGEST_LEN])
     }
 }
 
-void
+VAPOR_SHA256_FN void
 vapor_sha256_buf(const void *data, size_t len,
                  uint8_t out[VAPOR_SHA256_DIGEST_LEN])
 {
@@ -138,7 +147,7 @@ vapor_sha256_buf(const void *data, size_t len,
     vapor_sha256_final(&c, out);
 }
 
-void
+VAPOR_SHA256_FN void
 vapor_sha256_hex(const uint8_t digest[VAPOR_SHA256_DIGEST_LEN],
                  char out[VAPOR_SHA256_HEX_LEN + 1])
 {
@@ -152,7 +161,7 @@ vapor_sha256_hex(const uint8_t digest[VAPOR_SHA256_DIGEST_LEN],
     out[VAPOR_SHA256_HEX_LEN] = '\0';
 }
 
-void
+VAPOR_SHA256_FN void
 vapor_sha256_hex_buf(const void *data, size_t len,
                      char out[VAPOR_SHA256_HEX_LEN + 1])
 {

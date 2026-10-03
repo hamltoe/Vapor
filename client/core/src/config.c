@@ -50,6 +50,16 @@ vapor_client_set_server_url(vapor_client *vc, const char *url)
         vapor_client_set_error(vc, "server URL must start with http:// or https://");
         return -1;
     }
+#if defined(VAPOR_TARGET_XP)
+    /* XP SChannel stops at TLS 1.0. Current HTTPS servers will not complete
+     * a handshake, so refuse here instead of failing inside WinHTTP. */
+    if (vapor_str_has_prefix(url, "https://")) {
+        vapor_client_set_error(vc,
+                               "this Windows XP build only supports http:// "
+                               "to a Vapor server on the LAN");
+        return -1;
+    }
+#endif
     if ((size_t)snprintf(buf, sizeof(buf), "%s", url) >= sizeof(buf)) {
         vapor_client_set_error(vc, "server URL is too long");
         return -1;
@@ -296,6 +306,15 @@ vapor_client_open(vapor_client *vc)
         return -1;
     }
     load_config_file(vc);
+#if defined(VAPOR_TARGET_XP)
+    if (vapor_str_has_prefix(vc->cfg.server_url, "https://")) {
+        vapor_client_set_error(vc,
+                               "this Windows XP build only supports http:// "
+                               "(the saved server in %s is https)",
+                               vc->config_path);
+        return -1;
+    }
+#endif
 
     if (sqlite3_open_v2(vc->db_path, &vc->db,
                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE

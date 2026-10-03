@@ -263,6 +263,12 @@ test_manifest_roundtrip(void)
     }
     check(vapor_manifest_pick_target(&m, "macos", "x86_64") == NULL,
           "no target for unknown platform");
+    t = vapor_manifest_pick_target(&m, "windows", "x86_64");
+    check(t && t->exec && strcmp(t->exec, "bin/HollowVale.exe") == 0,
+          "64-bit Windows keeps the exact target");
+    t = vapor_manifest_pick_target(&m, "windows", "x86");
+    check(t && t->exec && strcmp(t->exec, "bin/HollowVale.exe") == 0,
+          "32-bit Windows can try an older x86_64 label");
 
     /* Serialize and reparse: the round trip must preserve the fields the
      * installer and launcher depend on. */
@@ -1063,6 +1069,118 @@ test_saves(void)
 #endif
 }
 
+static void
+write_mini_pe(unsigned char *pe, size_t n, uint16_t machine)
+{
+    memset(pe, 0, n);
+    pe[0] = 'M';
+    pe[1] = 'Z';
+    put_u32(pe + 0x3c, 0x80);
+    memcpy(pe + 0x80, "PE\0\0", 4);
+    put_u16(pe + 0x84, machine);
+}
+
+static void
+test_pe_arch_and_pick(void)
+{
+    unsigned char   pe[256];
+    const char     *path = "vapor-pe-arch-selftest.exe";
+    const char     *zip = "vapor-pe-arch-selftest.zip";
+    FILE           *f;
+    vapor_manifest  m;
+    char            err[256];
+    const vapor_target *t;
+    static const char *both =
+        "{\"schema\":1,\"id\":\"arch-game\",\"name\":\"Arch\","
+        "\"version\":\"1\",\"package\":{\"file\":\"p.zip\",\"format\":\"zip\","
+        "\"size\":1,\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934c"
+        "a495991b7852b855\"},\"targets\":["
+        "{\"platform\":\"windows\",\"arch\":\"x86\",\"exec\":\"game32.exe\"},"
+        "{\"platform\":\"windows\",\"arch\":\"x86_64\",\"exec\":\"game64.exe\"},"
+        "{\"platform\":\"linux\",\"arch\":\"x86_64\",\"exec\":\"game\"}]}";
+    static const char *only32 =
+        "{\"schema\":1,\"id\":\"arch-game\",\"name\":\"Arch\","
+        "\"version\":\"1\",\"package\":{\"file\":\"p.zip\",\"format\":\"zip\","
+        "\"size\":1,\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934c"
+        "a495991b7852b855\"},\"targets\":["
+        "{\"platform\":\"windows\",\"arch\":\"x86\",\"exec\":\"game32.exe\"}]}";
+    static const char *unlabeled =
+        "{\"schema\":1,\"id\":\"arch-game\",\"name\":\"Arch\","
+        "\"version\":\"1\",\"package\":{\"file\":\"p.zip\",\"format\":\"zip\","
+        "\"size\":1,\"sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934c"
+        "a495991b7852b855\"},\"targets\":["
+        "{\"platform\":\"windows\",\"exec\":\"any.exe\"},"
+        "{\"platform\":\"windows\",\"arch\":\"x86_64\",\"exec\":\"game64.exe\"}]}";
+
+    puts("pe arch");
+    write_mini_pe(pe, sizeof(pe), 0x14c);
+    check(vapor_pe_arch_mem(pe, sizeof(pe))
+              && strcmp(vapor_pe_arch_mem(pe, sizeof(pe)), "x86") == 0,
+          "PE machine 0x14c is x86");
+    write_mini_pe(pe, sizeof(pe), 0x8664);
+    check(vapor_pe_arch_mem(pe, sizeof(pe))
+              && strcmp(vapor_pe_arch_mem(pe, sizeof(pe)), "x86_64") == 0,
+          "PE machine 0x8664 is x86_64");
+    check(vapor_pe_arch_mem("MZ", 2) == NULL, "short MZ is not a PE");
+
+    write_mini_pe(pe, sizeof(pe), 0x14c);
+    f = fopen(path, "wb");
+    check(f != NULL, "writes a 32-bit PE");
+    if (f) {
+        check(fwrite(pe, 1, sizeof(pe), f) == sizeof(pe), "PE bytes written");
+        fclose(f);
+    }
+    check(vapor_pe_arch_file(path)
+              && strcmp(vapor_pe_arch_file(path), "x86") == 0,
+          "reads x86 from a file");
+    {
+        mz_zip_archive zipw;
+
+        memset(&zipw, 0, sizeof(zipw));
+        check(mz_zip_writer_init_file(&zipw, zip, 0), "opens a test zip");
+        check(mz_zip_writer_add_mem(&zipw, "bin/game.exe", pe, sizeof(pe),
+                                    MZ_DEFAULT_LEVEL),
+              "stores the PE in the zip");
+        check(mz_zip_writer_finalize_archive(&zipw), "finalizes the zip");
+        mz_zip_writer_end(&zipw);
+    }
+    check(vapor_pe_arch_zip(zip, "bin/game.exe")
+              && strcmp(vapor_pe_arch_zip(zip, "bin/game.exe"), "x86") == 0,
+          "reads x86 from a zip entry");
+    remove(path);
+    remove(zip);
+
+    puts("arch pick");
+    check(vapor_manifest_parse(both, strlen(both), &m, err, sizeof(err)) == 0,
+          "parses mixed-arch manifest");
+    t = vapor_manifest_pick_target(&m, "windows", "x86_64");
+    check(t && strcmp(t->exec, "game64.exe") == 0,
+          "x86_64 host prefers the 64-bit target");
+    t = vapor_manifest_pick_target(&m, "windows", "x86");
+    check(t && strcmp(t->exec, "game32.exe") == 0,
+          "x86 host prefers the 32-bit target");
+    t = vapor_manifest_pick_target(&m, "linux", "x86_64");
+    check(t && strcmp(t->exec, "game") == 0, "linux pick is unchanged");
+    check(vapor_manifest_pick_target(&m, "linux", "x86") == NULL,
+          "linux has no 32-bit fallback");
+    vapor_manifest_free(&m);
+
+    check(vapor_manifest_parse(only32, strlen(only32), &m, err, sizeof(err)) == 0,
+          "parses x86-only manifest");
+    t = vapor_manifest_pick_target(&m, "windows", "x86_64");
+    check(t && strcmp(t->exec, "game32.exe") == 0,
+          "64-bit Windows runs an x86 target");
+    vapor_manifest_free(&m);
+
+    check(vapor_manifest_parse(unlabeled, strlen(unlabeled), &m, err, sizeof(err))
+              == 0,
+          "parses unlabeled manifest");
+    t = vapor_manifest_pick_target(&m, "windows", "x86");
+    check(t && strcmp(t->exec, "any.exe") == 0,
+          "unlabeled target beats a last-resort x86_64 label");
+    vapor_manifest_free(&m);
+}
+
 int
 main(void)
 {
@@ -1077,6 +1195,7 @@ main(void)
     test_glob();
     test_buf();
     test_manifest_roundtrip();
+    test_pe_arch_and_pick();
     test_saves();
     test_iso9660();
     test_iso9660_merge();

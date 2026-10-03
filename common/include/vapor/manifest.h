@@ -18,7 +18,7 @@ typedef struct {
  * without any other field changing meaning. */
 typedef struct {
     char     *platform;    /* "windows" | "linux" */
-    char     *arch;        /* "x86_64" */
+    char     *arch;        /* "x86_64" or "x86"; NULL means any arch */
     char     *runtime;
     char     *exec;        /* relative to install dir */
     char    **args;
@@ -80,8 +80,10 @@ int vapor_manifest_parse(const char *json, size_t len, vapor_manifest *out,
 /* Pretty-printed JSON; caller frees. NULL on allocation failure. */
 char *vapor_manifest_serialize(const vapor_manifest *m);
 
-/* Exact platform+arch match first, then platform with any arch. NULL if the
- * manifest has nothing runnable for this host. */
+/* Exact platform+arch match first. A 64-bit Windows host may then run an
+ * x86 target (WOW64). A target with no arch is next. A 32-bit Windows host
+ * may then try a target labeled x86_64, so manifests published before arch
+ * detection still launch. NULL if nothing is runnable for this host. */
 const vapor_target *vapor_manifest_pick_target(const vapor_manifest *m,
                                                const char *platform,
                                                const char *arch);

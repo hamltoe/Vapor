@@ -59,19 +59,24 @@ are vendored into `third_party/` and are not committed; run
 | --- | --- | --- |
 | Server HTTP | civetweb | Built with `NO_SSL`. Range / `If-Modified-Since` come from its file handler. |
 | Client HTTP (Linux) | libcurl | Resume, progress, `CURLOPT_PINNEDPUBLICKEY`. |
-| Client HTTP (Windows) | WinHTTP | Same request shape; public-key pinning is not implemented here. |
+| Client HTTP (Windows) | WinHTTP | Same request shape; public-key pinning is not implemented here. The XP client uses the IE proxy and `http://` only. |
 | Passwords | libsodium | Argon2id (`crypto_pwhash_str`) and `randombytes_buf`. Server only. |
 | Database | SQLite amalgamation | WAL, foreign keys, one connection, serialized. |
 | JSON | cJSON | Manifests and API bodies. |
 | Integrity | vendored SHA-256 | Same bytes on both ends. |
 | Archives | miniz | Zip only for the prototype. |
-| GUI | Nuklear + SDL2 + OpenGL 2 | Immediate mode; worker thread owns `libvapor` during jobs. |
+| GUI | Nuklear + SDL2 + OpenGL 2 | Immediate mode; worker thread owns `libvapor` during jobs. The XP client links SDL 2.0.22 instead of 2.32. |
 | Cover decode | stb_image | PNG and JPEG only. |
 | Store metadata | libcurl (server) | Steam store search, appdetails, reviews; optional. |
 
 TLS is not compiled into vapord. Put Caddy (or another reverse proxy) in
 front of it, or pin a self-signed certificate in the Linux client. See
 [operations.md](operations.md).
+
+The Windows XP SP3 client is a separate 32-bit MinGW build
+(`scripts/build-windows-xp.ps1`), not the Visual Studio x64 client. It
+speaks `http://` only. A 64-bit Windows client can still launch an `x86`
+target; a 32-bit client will not launch a real 64-bit executable.
 
 ## Shared code
 
@@ -81,7 +86,7 @@ front of it, or pin a self-signed certificate in the Linux client. See
   error codes.
 - `vapor/manifest.h` — schema-1 parse, serialize, and target selection.
 - `vapor/util.h` — id/version validation, natural version compare, hex,
-  glob match.
+  glob match, and the Windows PE machine type (`x86` or `x86_64`).
 - `vapor/sha256.h` and `vapor/buf.h` — hashing and growable buffers.
 
 `platform_win32.c` and `platform_posix.c` are the only files with OS

@@ -15,6 +15,11 @@
 
 #include "vapor/buf.h"
 
+#ifndef _CRT_WIDE
+#define VAPOR_CRT_WIDE_IMPL(s) L##s
+#define _CRT_WIDE(s) VAPOR_CRT_WIDE_IMPL(s)
+#endif
+
 int
 vapor_net_global_init(void)
 {
@@ -102,9 +107,16 @@ vapor_net_perform(const vapor_net_req *req, vapor_net_res *res)
         goto cleanup;
     }
 
+    /* AUTOMATIC_PROXY is Windows 8.1. XP WinHTTP only has the IE default proxy. */
+#if defined(VAPOR_TARGET_XP)
+    session = WinHttpOpen(L"vapor-client/" _CRT_WIDE(VAPOR_VERSION_STRING),
+                          WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+#else
     session = WinHttpOpen(L"vapor-client/" _CRT_WIDE(VAPOR_VERSION_STRING),
                           WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+#endif
     if (!session) {
         fail(res, "WinHttpOpen failed");
         goto cleanup;
@@ -131,12 +143,15 @@ vapor_net_perform(const vapor_net_req *req, vapor_net_res *res)
         goto cleanup;
     }
 
+#if !defined(VAPOR_TARGET_XP)
+    /* WINHTTP_OPTION_REDIRECT_POLICY is Vista. XP follows its own redirect rules. */
     {
         DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
 
         WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &policy,
                          sizeof(policy));
     }
+#endif
 
     WinHttpAddRequestHeaders(request,
                              req->dest_path ? L"Accept: */*"

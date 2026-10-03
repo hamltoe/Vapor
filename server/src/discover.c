@@ -1822,9 +1822,44 @@ rel_is_dos(const char *dir, const char *zip, const char *rel)
     return 0;
 }
 
+/* Windows arch comes from the PE machine field when the file is readable,
+ * on disk or inside the package zip. Anything else stays x86_64, which is
+ * what older clients already expect for Linux and for non-PE names. */
+static const char *
+windows_exec_arch(const char *dir, const char *zip, const char *strip,
+                  const char *exec)
+{
+    char        full[VAPORD_PATH_MAX];
+    char        entry[VAPORD_PATH_MAX];
+    const char *arch;
+
+    if (dir && dir[0] && exec && exec[0]
+        && join2(full, sizeof(full), dir, exec) == 0) {
+        arch = vapor_pe_arch_file(full);
+        if (arch) {
+            return arch;
+        }
+    }
+    if (zip && zip[0] && exec && exec[0]) {
+        if (strip && strip[0]
+            && (size_t)snprintf(entry, sizeof(entry), "%s%s", strip, exec)
+                   < sizeof(entry)) {
+            arch = vapor_pe_arch_zip(zip, entry);
+            if (arch) {
+                return arch;
+            }
+        }
+        arch = vapor_pe_arch_zip(zip, exec);
+        if (arch) {
+            return arch;
+        }
+    }
+    return "x86_64";
+}
+
 static int
 add_target(vapor_manifest *m, const char *platform, const char *exec,
-           const char *runtime)
+           const char *runtime, const char *arch)
 {
     vapor_target *grown;
     vapor_target *t;
@@ -1837,7 +1872,7 @@ add_target(vapor_manifest *m, const char *platform, const char *exec,
     t = &m->targets[m->ntargets];
     memset(t, 0, sizeof(*t));
     t->platform = vapor_strdup(platform);
-    t->arch = vapor_strdup("x86_64");
+    t->arch = vapor_strdup(arch && arch[0] ? arch : "x86_64");
     t->exec = vapor_strdup(exec);
     if (runtime && runtime[0] && strcmp(runtime, "native") != 0) {
         t->runtime = vapor_strdup(runtime);
@@ -2144,11 +2179,16 @@ publish_game(vapord *app, const char *folder, const char *abs_dir,
                    && rel_is_dos(abs_dir, pkg_path, win_exec)) {
             win_runtime = "dosbox";
         }
-        if (win_exec && *win_exec && add_target(&m, "windows", win_exec, win_runtime) != 0) {
+        if (win_exec && *win_exec
+            && add_target(&m, "windows", win_exec, win_runtime,
+                          windows_exec_arch(abs_dir, pkg_path, strip_prefix,
+                                            win_exec))
+                   != 0) {
             goto done;
         }
     }
-    if (lin_exec && *lin_exec && add_target(&m, "linux", lin_exec, NULL) != 0) {
+    if (lin_exec && *lin_exec
+        && add_target(&m, "linux", lin_exec, NULL, "x86_64") != 0) {
         goto done;
     }
     if (m.ntargets == 0 && !allow_no_target) {

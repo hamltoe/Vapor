@@ -51,6 +51,7 @@ parser in `common/src/manifest.c`.
 | `package.file` | Bare filename. No `/` or `\` |
 | `package.format` | `zip` (extract, then inspect), `iso` or `file` (copy as-is) |
 | `package.sha256` | 64 lowercase hex characters |
+| `targets[].arch` | `x86_64` or `x86`. Discovery reads the Windows PE machine field (`0x14c` is `x86`, `0x8664` is `x86_64`). Linux targets stay `x86_64` |
 | `targets[].exec` | Relative to the install dir. No `..`. Optional when the payload is a disc image |
 | `targets[].runtime` | `null` or `"native"`; `"dosbox"` launches DOSBox Staging. Any other string is stored and Play names it until that runtime exists |
 | `install_mode` | Optional. `portable`, `setup`, `unpack_disc`, or `keep_disc`. Omitted means the usual heuristics |
@@ -275,10 +276,13 @@ predate the recipe, not the primary path.
 
 ## Launch
 
-`vapor launch <id>` picks the first target whose `platform` and `arch`
-match the host, then any target for that platform. `$INSTALL_DIR` is
+`vapor launch <id>` picks a target in this order: exact `platform` and
+`arch`; on 64-bit Windows, an `x86` target (it runs under WOW64); a target
+for that platform with no `arch`; on 32-bit Windows, a target still labeled
+`x86_64` from a scan that predates PE detection. `$INSTALL_DIR` is
 expanded in `args` and `env`, then converted to native separators so
-Windows does not mix `/` and `\`.
+Windows does not mix `/` and `\`. A file that is actually 64-bit does not
+start on 32-bit Windows.
 
 The process is spawned with `CreateProcessW` or `fork` + `execvp`. Start
 and exit time are recorded as playtime.
@@ -289,7 +293,9 @@ it: that DRM cannot load on Windows 10+, and the wrapper's
 unprotected exe in the install folder when one exists. For a Doom 3
 tree (`base/pak000.pk4` + `base/game00.pk4`) it launches dhewm3 against
 those paks, downloading the official Windows build into
-`%LOCALAPPDATA%\Vapor\runtimes\dhewm3` if needed. Other SafeDisc titles
+`%LOCALAPPDATA%\Vapor\runtimes\dhewm3` if needed. The Windows XP client
+cannot download that archive; put `dhewm3.exe` in the install folder or
+in that runtimes directory. Other SafeDisc titles
 need the publisher's patch or a source-port exe in the install folder.
 SECDRV.SYS is never enabled. The GUI install job reports extract, then
 the Windows installer; it does not stay on Verify after the download

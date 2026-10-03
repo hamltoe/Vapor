@@ -311,15 +311,20 @@ draw_settings(struct nk_context *ctx, vapor_app *app, int busy)
     if (!busy && nk_button_label(ctx, "Save settings")) {
         app->server_url[app->server_url_len] = '\0';
         app->library_dir[app->library_dir_len] = '\0';
-        snprintf(app->vc->cfg.server_url, sizeof(app->vc->cfg.server_url), "%s",
-                 app->server_url);
-        snprintf(app->vc->cfg.library_dir, sizeof(app->vc->cfg.library_dir), "%s",
-                 app->library_dir);
-        if (vapor_client_save_config(app->vc) != 0) {
+        if (vapor_client_set_server_url(app->vc, app->server_url) != 0) {
             vapor_gui_notice(app, 1, "%s", app->vc->err);
         } else {
-            vapor_gui_notice(app, 0, "settings saved");
-            vapor_gui_start_refresh(app);
+            snprintf(app->server_url, sizeof(app->server_url), "%s",
+                     app->vc->cfg.server_url);
+            app->server_url_len = (int)strlen(app->server_url);
+            snprintf(app->vc->cfg.library_dir,
+                     sizeof(app->vc->cfg.library_dir), "%s", app->library_dir);
+            if (vapor_client_save_config(app->vc) != 0) {
+                vapor_gui_notice(app, 1, "%s", app->vc->err);
+            } else {
+                vapor_gui_notice(app, 0, "settings saved");
+                vapor_gui_start_refresh(app);
+            }
         }
     }
     nk_layout_row_push(ctx, 120);

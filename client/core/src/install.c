@@ -1435,8 +1435,25 @@ scan_install_cb(const char *rel, const char *abs, void *ud)
     return 0;
 }
 
+static const char *
+windows_pe_arch(const char *dir, const char *exec)
+{
+    char        full[VAPOR_PATH_MAX];
+    const char *arch;
+
+    if (!dir || !dir[0] || !exec || !exec[0]) {
+        return "x86_64";
+    }
+    if (join(full, sizeof(full), dir, exec) != 0) {
+        return "x86_64";
+    }
+    arch = vapor_pe_arch_file(full);
+    return arch ? arch : "x86_64";
+}
+
 static int
-add_discovered_target(vapor_manifest *m, const char *platform, const char *exec)
+add_discovered_target(vapor_manifest *m, const char *platform, const char *exec,
+                      const char *arch)
 {
     vapor_target *grown;
     vapor_target *t;
@@ -1450,7 +1467,7 @@ add_discovered_target(vapor_manifest *m, const char *platform, const char *exec)
     t = &m->targets[m->ntargets];
     memset(t, 0, sizeof(*t));
     t->platform = vapor_strdup(platform);
-    t->arch = vapor_strdup("x86_64");
+    t->arch = vapor_strdup(arch && arch[0] ? arch : "x86_64");
     t->exec = vapor_strdup(exec);
     if (!t->platform || !t->arch || !t->exec) {
         return -1;
@@ -1512,12 +1529,14 @@ discover_install_content(vapor_client *vc, const char *install_dir,
 
     if (m->ntargets == 0) {
         if (scan.win_exec[0]
-            && add_discovered_target(m, "windows", scan.win_exec) != 0) {
+            && add_discovered_target(m, "windows", scan.win_exec,
+                                     windows_pe_arch(install_dir, scan.win_exec))
+                   != 0) {
             vapor_client_set_error(vc, "out of memory");
             return -1;
         }
         if (scan.lin_exec[0]
-            && add_discovered_target(m, "linux", scan.lin_exec) != 0) {
+            && add_discovered_target(m, "linux", scan.lin_exec, "x86_64") != 0) {
             vapor_client_set_error(vc, "out of memory");
             return -1;
         }
@@ -1550,19 +1569,28 @@ install_tree_has_iso(const char *install_dir)
 }
 
 static int
-set_windows_exec(vapor_manifest *m, const char *exec)
+set_windows_exec(vapor_manifest *m, const char *dir, const char *exec)
 {
-    size_t i;
+    size_t      i;
+    const char *arch = windows_pe_arch(dir, exec);
+    char       *arch_copy;
 
     for (i = 0; i < m->ntargets; i++) {
         if (m->targets[i].platform
             && strcmp(m->targets[i].platform, "windows") == 0) {
             free(m->targets[i].exec);
             m->targets[i].exec = vapor_strdup(exec);
-            return m->targets[i].exec ? 0 : -1;
+            arch_copy = vapor_strdup(arch);
+            if (!m->targets[i].exec || !arch_copy) {
+                free(arch_copy);
+                return -1;
+            }
+            free(m->targets[i].arch);
+            m->targets[i].arch = arch_copy;
+            return 0;
         }
     }
-    return add_discovered_target(m, "windows", exec);
+    return add_discovered_target(m, "windows", exec, arch);
 }
 
 static int
@@ -2342,7 +2370,7 @@ verified:
     if (m.install.launch && rel_file_exists(payload_dir, m.install.launch)
         && looks_playable_exec(m.install.launch)
         && strcmp(vapor_host_platform(), "windows") == 0) {
-        if (set_windows_exec(&m, m.install.launch) != 0) {
+        if (set_windows_exec(&m, payload_dir, m.install.launch) != 0) {
             vapor_client_set_error(vc, "out of memory");
             vapor_plat_remove_tree(install_dir);
             vapor_manifest_free(&m);
@@ -2757,7 +2785,7 @@ setup_game_impl(vapor_client *vc, const char *game_id, const setup_hooks *hooks)
         return 1;
     }
 
-    if (set_windows_exec(&m, exec_rel) != 0) {
+    if (set_windows_exec(&m, play_dir, exec_rel) != 0) {
         vapor_client_set_error(vc, "out of memory");
         vapor_manifest_free(&m);
         return -1;

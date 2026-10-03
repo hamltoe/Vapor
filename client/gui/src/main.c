@@ -13,6 +13,13 @@
 
 #include "gui.h"
 
+#if defined(VAPOR_TARGET_XP)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <SDL_opengl.h>
 
 #include "nuklear_sdl_gl2.h"
@@ -46,6 +53,47 @@ usage(void)
     printf("  --install GAME   start installing GAME as soon as the window is\n");
     printf("                   up, for shortcuts and for testing\n");
     printf("  -h, --help       this message\n");
+}
+
+/* Depth 24 and stencil 8 are what Nuklear's GL2 path prefers. The Microsoft
+ * software rasterizer on XP often cannot provide them, so that build retries
+ * with a plainer pixel format. Attributes have to be set before the window. */
+static SDL_Window *
+open_gl_window(SDL_GLContext *out_gl)
+{
+    static const int depths[] = {24, 16, 0};
+    static const int stencils[] = {8, 0, 0};
+    int              i;
+    int              tries = 1;
+
+#if defined(VAPOR_TARGET_XP)
+    tries = 3;
+#endif
+    *out_gl = NULL;
+    for (i = 0; i < tries; i++) {
+        SDL_Window   *win;
+        SDL_GLContext gl;
+
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, depths[i]);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, stencils[i]);
+        win = SDL_CreateWindow(VAPOR_GUI_TITLE, SDL_WINDOWPOS_CENTERED,
+                               SDL_WINDOWPOS_CENTERED, VAPOR_GUI_WIDTH,
+                               VAPOR_GUI_HEIGHT,
+                               SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN
+                                   | SDL_WINDOW_RESIZABLE
+                                   | SDL_WINDOW_ALLOW_HIGHDPI);
+        if (!win) {
+            continue;
+        }
+        gl = SDL_GL_CreateContext(win);
+        if (gl) {
+            *out_gl = gl;
+            return win;
+        }
+        SDL_DestroyWindow(win);
+    }
+    return NULL;
 }
 
 int
@@ -92,26 +140,25 @@ main(int argc, char **argv)
         return 1;
     }
 
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-
-    win = SDL_CreateWindow(VAPOR_GUI_TITLE, SDL_WINDOWPOS_CENTERED,
-                           SDL_WINDOWPOS_CENTERED, VAPOR_GUI_WIDTH,
-                           VAPOR_GUI_HEIGHT,
-                           SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN
-                               | SDL_WINDOW_RESIZABLE
-                               | SDL_WINDOW_ALLOW_HIGHDPI);
-    if (!win) {
-        fprintf(stderr, "vapor-gui: SDL_CreateWindow: %s\n", SDL_GetError());
-        SDL_Quit();
-        vapor_client_close(&vc);
-        return 1;
-    }
-    gl = SDL_GL_CreateContext(win);
-    if (!gl) {
-        fprintf(stderr, "vapor-gui: SDL_GL_CreateContext: %s\n", SDL_GetError());
-        SDL_DestroyWindow(win);
+    win = open_gl_window(&gl);
+    if (!win || !gl) {
+#if defined(VAPOR_TARGET_XP)
+        /* This image is subsystem windows, so a failed start would otherwise
+         * vanish. A console exists only long enough to show the error. */
+        AllocConsole();
+        freopen("CONOUT$", "w", stderr);
+#endif
+        fprintf(stderr, "vapor-gui: could not open an OpenGL window: %s\n",
+                SDL_GetError());
+#if defined(VAPOR_TARGET_XP)
+        fprintf(stderr, "vapor-gui: this XP build needs a working OpenGL "
+                        "driver; use vapor.exe if the window cannot start\n");
+        fprintf(stderr, "press Enter to close\n");
+        (void)getchar();
+#endif
+        if (win) {
+            SDL_DestroyWindow(win);
+        }
         SDL_Quit();
         vapor_client_close(&vc);
         return 1;

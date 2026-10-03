@@ -38,6 +38,30 @@ into `third_party/sdl2` by the vendor script.
 
 Pass `-NoGui` to `build-windows.ps1` only if you must skip SDL2.
 
+**Windows XP Professional SP3, 32-bit**
+
+```
+powershell -File scripts/vendor-deps.ps1
+powershell -File scripts/build-windows-xp.ps1
+```
+
+This uses MinGW-w64 i686 (MSYS2 `mingw-w64-i686-gcc`, msvcrt, not UCRT)
+and writes `build-windows-xp\bin`. Copy that whole directory onto the XP
+machine: `vapor-gui.exe` loads `SDL2.dll` from the same folder. It does not
+replace the Visual Studio client. The intended CPU is an Athlon XP,
+which has no SSE2. Vapor and a rebuilt mingw-w64 C runtime are compiled
+`-march=i686` so `stat` and `printf` from the stock Pentium 4 CRT are
+not linked in. Point it at `http://` on the LAN. `https://` is rejected: XP
+SChannel is TLS 1.0, so Caddy, Let's Encrypt, and GitHub will not connect,
+and the dhewm3 auto-download does not run. Install `dhewm3.exe` by hand
+for a SafeDisc Doom 3 tree. There is no UAC; portable games install under
+the per-user data directory (`Local Settings\Application Data\Vapor`)
+without an administrator logon, and installers that write to Program Files
+need an administrator account. Names and paths must fit the system ANSI
+code page, and paths longer than 260 characters fail. A real 64-bit
+executable does not start. The process has a 2 GB address space. The GUI
+needs an OpenGL driver that can open a window; otherwise use `vapor.exe`.
+
 ## Windows + WSL host
 
 Build vapord in Ubuntu WSL (`scripts/build-linux.sh`), then from PowerShell
