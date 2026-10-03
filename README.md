@@ -105,7 +105,8 @@ against SDL 2.0.22 built from source. Pass `-NoGui` to skip that and build
 SSE2). Vapor and the C runtime it links are compiled `-march=i686` so a
 Pentium 4 instruction is not in the image.
 
-That client talks to vapord over `http://` on the LAN. HTTPS is refused:
+That client talks to vapord over `http://` on the LAN. A bare address such
+as `192.168.1.107:8777` is stored as `http://`. HTTPS is refused:
 XP's TLS stack stops at TLS 1.0. Paths and account names have to fit the
 system code page (XP has no UTF-8 ANSI code page). A game whose executable
 is actually 64-bit will not launch. Doom 3's dhewm3 port is not downloaded
@@ -275,11 +276,12 @@ cd build-windows\bin
 .\vapor.exe launch my-game
 ```
 
-If `ping` fails from Windows to WSL: bind vapord to `0.0.0.0`, allow
-port 8777 in the Windows firewall, and use the WSL address from
-`wsl hostname -I` (not `localhost`, unless you have port forwarding).
-`scripts/start-wsl-server.ps1` already binds `0.0.0.0` and WSL2 forwards
-localhost, so `http://127.0.0.1:8777` is the usual URL.
+On this PC, `http://127.0.0.1:8777` reaches vapord. Another machine on
+the LAN, including the Windows XP client, uses this PC's Ethernet address
+(`http://192.168.1.107:8777`). `scripts/start-wsl-server.ps1` forwards that
+address to WSL and allows the port from the local subnet. WSL2 does not
+do that by itself, so a client on another PC times out until the starter
+has published the port.
 
 ### GUI
 

@@ -41,30 +41,52 @@ vapor_client_set_server_url(vapor_client *vc, const char *url)
     char   buf[sizeof(vc->cfg.server_url)];
     size_t n;
 
-    if (!url || !*url) {
+    if (!url) {
         vapor_client_set_error(vc, "a server URL is required");
         return -1;
     }
-    if (!vapor_str_has_prefix(url, "http://")
-        && !vapor_str_has_prefix(url, "https://")) {
-        vapor_client_set_error(vc, "server URL must start with http:// or https://");
+    while (*url == ' ' || *url == '\t' || *url == '\r' || *url == '\n') {
+        url++;
+    }
+    if (!*url) {
+        vapor_client_set_error(vc, "a server URL is required");
         return -1;
+    }
+    if ((size_t)snprintf(buf, sizeof(buf), "%s", url) >= sizeof(buf)) {
+        vapor_client_set_error(vc, "server URL is too long");
+        return -1;
+    }
+    n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == ' ' || buf[n - 1] == '\t'
+                     || buf[n - 1] == '\r' || buf[n - 1] == '\n')) {
+        buf[--n] = '\0';
+    }
+    /* The login field is often filled with the LAN address alone. */
+    if (!vapor_str_has_prefix(buf, "http://")
+        && !vapor_str_has_prefix(buf, "https://")) {
+        if (n == 0 || strchr(buf, ' ') || strchr(buf, '\\')) {
+            vapor_client_set_error(vc,
+                                   "server URL must start with http:// or https://");
+            return -1;
+        }
+        if (n + strlen("http://") >= sizeof(buf)) {
+            vapor_client_set_error(vc, "server URL is too long");
+            return -1;
+        }
+        memmove(buf + strlen("http://"), buf, n + 1);
+        memcpy(buf, "http://", strlen("http://"));
+        n += strlen("http://");
     }
 #if defined(VAPOR_TARGET_XP)
     /* XP SChannel stops at TLS 1.0. Current HTTPS servers will not complete
      * a handshake, so refuse here instead of failing inside WinHTTP. */
-    if (vapor_str_has_prefix(url, "https://")) {
+    if (vapor_str_has_prefix(buf, "https://")) {
         vapor_client_set_error(vc,
                                "this Windows XP build only supports http:// "
                                "to a Vapor server on the LAN");
         return -1;
     }
 #endif
-    if ((size_t)snprintf(buf, sizeof(buf), "%s", url) >= sizeof(buf)) {
-        vapor_client_set_error(vc, "server URL is too long");
-        return -1;
-    }
-    n = strlen(buf);
     while (n > 0 && (buf[n - 1] == '/' || buf[n - 1] == '\\')) {
         buf[--n] = '\0';
     }

@@ -51,7 +51,9 @@ machine: `vapor-gui.exe` loads `SDL2.dll` from the same folder. It does not
 replace the Visual Studio client. The intended CPU is an Athlon XP,
 which has no SSE2. Vapor and a rebuilt mingw-w64 C runtime are compiled
 `-march=i686` so `stat` and `printf` from the stock Pentium 4 CRT are
-not linked in. Point it at `http://` on the LAN. `https://` is rejected: XP
+not linked in. Point it at `http://192.168.1.107:8777`, or type the host and
+port alone (`192.168.1.107:8777`); a missing scheme is stored as `http://`.
+`https://` is rejected: XP
 SChannel is TLS 1.0, so Caddy, Let's Encrypt, and GitHub will not connect,
 and the dhewm3 auto-download does not run. Install `dhewm3.exe` by hand
 for a SafeDisc Doom 3 tree. There is no UAC; portable games install under
