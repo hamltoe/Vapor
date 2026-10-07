@@ -326,16 +326,29 @@ to see new versions after you ingest them.
 ## Account saves
 
 A game's `vapor.json` can list `saves`. Those paths — next to the game,
-under the user profile, or on another drive — are the only files that
-sync. Play downloads the account archive before the process starts and
-uploads it after the process exits, for the user who is signed in. A
-game with no `saves` list, a local shortcut, or a signed-out client
-does not sync. Offline play still works; the upload waits until the
-next signed-in session that can see a change.
+under the user profile, or on another drive — sync for the signed-in
+user. The client also picks up any directory named `save`, `saves`, or
+`savegames` under the install (Half-Life's `valve\save`, and the same
+idea on Linux or a newer Windows). A local shortcut does not sync.
 
-Two PCs playing the same game at the same time do not merge. The later
-exit replaces the account copy. A missing path is reported and skipped.
-One archive is limited to 256 MiB and 10,000 files.
+Play downloads the account archive before the process starts. Install
+and Setup do the same once the game directory exists, so a reinstall
+puts the saved games back without a separate launch. Remove uploads
+first, then runs the uninstaller. A signed-out Remove that would delete
+save files stops and asks for a sign-in.
+
+`%LOCALAPPDATA%` and `%APPDATA%` resolve to the XP folders (`Local
+Settings\Application Data`, `Application Data`) when the Vista names
+are unset, and to the usual profile folders on later Windows. `$HOME`
+and `%USERPROFILE%` follow the signed-in profile on either system. A
+path that does not exist on this machine is left untouched in the
+account archive, so a Windows XP PC and another PC can share one list
+without wiping the folders only one of them has.
+
+Two PCs playing the same game at the same time do not merge file
+contents inside one folder. The later exit replaces the slots that
+machine actually has. One archive is limited to 256 MiB and 10,000
+files.
 
 The files live in `saves_root` (default: a `saves` directory beside
 `db_path`), one zip per user per game.

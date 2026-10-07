@@ -1053,6 +1053,116 @@ test_saves(void)
     }
     check(strcmp(got, "progress") == 0, "restored save bytes");
 
+    /* A game with no authored saves still packs valve/save, and a second
+     * machine's gearbox/save stays in the account zip. */
+    {
+        const char *none = NULL;
+        FILE       *sf;
+
+#if defined(_WIN32)
+        _mkdir("vapor-save-hl");
+        _mkdir("vapor-save-hl/valve");
+        _mkdir("vapor-save-hl/valve/save");
+        _mkdir("vapor-save-hl/gearbox");
+        _mkdir("vapor-save-hl/gearbox/save");
+        _mkdir("vapor-save-hl-out");
+#else
+        mkdir("vapor-save-hl", 0755);
+        mkdir("vapor-save-hl/valve", 0755);
+        mkdir("vapor-save-hl/valve/save", 0755);
+        mkdir("vapor-save-hl/gearbox", 0755);
+        mkdir("vapor-save-hl/gearbox/save", 0755);
+        mkdir("vapor-save-hl-out", 0755);
+#endif
+        sf = fopen("vapor-save-hl/valve/save/quick.sav", "wb");
+        check(sf != NULL, "writes a half-life save");
+        if (sf) {
+            fputs("quick", sf);
+            fclose(sf);
+        }
+        sf = fopen("vapor-save-hl/gearbox/save/ops.sav", "wb");
+        check(sf != NULL, "writes an opposing force save");
+        if (sf) {
+            fputs("ops", sf);
+            fclose(sf);
+        }
+        check(vapor_saves_pack(&none, 0, "vapor-save-hl", "vapor-save-hl.zip",
+                               &missing, err, sizeof(err))
+                  == 0,
+              "packs discovered save directories");
+        check(missing == 0, "discovered saves were present");
+        remove("vapor-save-hl/valve/save/quick.sav");
+#if defined(_WIN32)
+        _rmdir("vapor-save-hl/valve/save");
+        _rmdir("vapor-save-hl/valve");
+#else
+        rmdir("vapor-save-hl/valve/save");
+        rmdir("vapor-save-hl/valve");
+#endif
+        sf = fopen("vapor-save-hl/gearbox/save/ops.sav", "wb");
+        if (sf) {
+            fputs("ops-newer", sf);
+            fclose(sf);
+        }
+        check(vapor_saves_pack(&none, 0, "vapor-save-hl", "vapor-save-hl-fresh.zip",
+                               &missing, err, sizeof(err))
+                  == 0,
+              "packs the saves that exist on this machine");
+        check(vapor_saves_merge("vapor-save-hl-fresh.zip", "vapor-save-hl.zip",
+                                "vapor-save-hl-merged.zip", err, sizeof(err))
+                  == 0,
+              "merges a slot this machine does not have");
+        check(vapor_saves_unpack("vapor-save-hl-merged.zip", &none, 0,
+                                 "vapor-save-hl-out", &skipped, err, sizeof(err))
+                  == 0,
+              "unpacks a merged archive");
+        sf = fopen("vapor-save-hl-out/valve/save/quick.sav", "rb");
+        check(sf != NULL, "keeps the other machine's save");
+        got[0] = '\0';
+        if (sf) {
+            if (!fgets(got, sizeof(got), sf)) {
+                got[0] = '\0';
+            }
+            fclose(sf);
+        }
+        check(strcmp(got, "quick") == 0, "other machine save bytes");
+        sf = fopen("vapor-save-hl-out/gearbox/save/ops.sav", "rb");
+        check(sf != NULL, "keeps this machine's save");
+        got[0] = '\0';
+        if (sf) {
+            if (!fgets(got, sizeof(got), sf)) {
+                got[0] = '\0';
+            }
+            fclose(sf);
+        }
+        check(strcmp(got, "ops-newer") == 0, "this machine save bytes");
+        remove("vapor-save-hl/gearbox/save/ops.sav");
+        remove("vapor-save-hl-out/valve/save/quick.sav");
+        remove("vapor-save-hl-out/gearbox/save/ops.sav");
+        remove("vapor-save-hl.zip");
+        remove("vapor-save-hl-fresh.zip");
+        remove("vapor-save-hl-merged.zip");
+#if defined(_WIN32)
+        _rmdir("vapor-save-hl-out/valve/save");
+        _rmdir("vapor-save-hl-out/valve");
+        _rmdir("vapor-save-hl-out/gearbox/save");
+        _rmdir("vapor-save-hl-out/gearbox");
+        _rmdir("vapor-save-hl-out");
+        _rmdir("vapor-save-hl/gearbox/save");
+        _rmdir("vapor-save-hl/gearbox");
+        _rmdir("vapor-save-hl");
+#else
+        rmdir("vapor-save-hl-out/valve/save");
+        rmdir("vapor-save-hl-out/valve");
+        rmdir("vapor-save-hl-out/gearbox/save");
+        rmdir("vapor-save-hl-out/gearbox");
+        rmdir("vapor-save-hl-out");
+        rmdir("vapor-save-hl/gearbox/save");
+        rmdir("vapor-save-hl/gearbox");
+        rmdir("vapor-save-hl");
+#endif
+    }
+
     remove("vapor-save-selftest/slot/slot1.sav");
     remove("vapor-save-selftest-out/slot/slot1.sav");
     remove(zip);

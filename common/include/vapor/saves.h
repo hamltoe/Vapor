@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Account save archives. Paths are admin-authored in vapor.json and copied
- * onto the manifest. The client never invents roots by scanning the disk. */
+/* Account save archives. Authored paths come from vapor.json. The client also
+ * picks up directories named save, saves, or savegames under the install. */
 
 #define VAPOR_SAVE_PATH_MAX       1024
 #define VAPOR_SAVE_MAX_PATHS      32
@@ -41,14 +41,22 @@ int vapor_file_is_dos_exe(const char *path);
 /* Same check for one zip entry. `entry` is the name stored in the archive. */
 int vapor_zip_entry_is_dos_exe(const char *zip_path, const char *entry);
 
-/* Zip the resolved roots into `zip_path`. Entry names are "<index>/<rel>" for
- * a directory root and "<index>" for a single file, so unpack can only write
- * back under those roots. 0 on success. *out_missing is 1 when a root does not
- * exist; the zip is not written in that case so a partial tree cannot replace
- * the account copy. -1 on a hard error (`err` explains it). */
+/* Zip the roots that exist on this machine, plus any save, saves, or
+ * savegames directory under `install_dir`. Authored entries are
+ * "<index>/<rel>". Discovered directories are "r/<relative>/<file>".
+ * A "_vapor_present.txt" entry lists the slots this machine actually has.
+ * 0 on success. *out_missing is 1 when an authored root does not exist.
+ * When nothing local exists the zip is not written, so the caller does not
+ * replace the account copy. -1 on a hard error (`err` explains it). */
 int vapor_saves_pack(const char *const *specs, size_t nspecs,
                      const char *install_dir, const char *zip_path,
                      int *out_missing, char *err, size_t errsz);
+
+/* Build `out_zip` from `account_zip`, replacing every slot listed in
+ * `fresh_zip`'s present-marker with the fresh entries. Slots this machine
+ * does not have stay as they were on the account. */
+int vapor_saves_merge(const char *fresh_zip, const char *account_zip,
+                      const char *out_zip, char *err, size_t errsz);
 
 /* Write a save zip back under the declared roots. *out_skipped is the number
  * of roots that could not be created. 0 on success, -1 on a hard error. */

@@ -173,7 +173,7 @@ public review score.
 - `unpack_disc` — today's ISO 9660 / Wise unpack
 - `keep_disc` — leave disc images in the tree. Play of a DOS title then fails with an explicit message until CD mount exists, instead of unpacking a disc the game cannot use
 
-`saves` is the list of files that sync to the signed-in account. See [api.md](api.md). A missing root is skipped and reported; it does not fail install. One sync is capped at 256 MiB and 10,000 files.
+`saves` is the list of files that sync to the signed-in account. See [api.md](api.md). The client also syncs any `save`, `saves`, or `savegames` directory under the install, which is where Half-Life GOTY writes `valve\save`. A path that is not on this machine stays in the account archive, so Windows XP and another PC can share one list. One sync is capped at 256 MiB and 10,000 files.
 
 When `runtime`, `dos_exec`, and `install_mode` are all omitted, discovery keeps the previous heuristics. A DOS `.COM`, or an `.EXE` that is MZ without a PE header, is published as `runtime: "dosbox"` on its own. `setup.com` and `install.com` are ignored, same as `setup.exe`.
 

@@ -2457,6 +2457,10 @@ verified:
             printf("  upgraded ... from %s\n", existing.version);
         }
     }
+    if (!needs_setup && vapor_saves_before_play(vc, &m, install_dir) != 0) {
+        vapor_manifest_free(&m);
+        return -1;
+    }
     vapor_manifest_free(&m);
     if (needs_setup) {
         int src;
@@ -2832,6 +2836,10 @@ setup_game_impl(vapor_client *vc, const char *game_id, const setup_hooks *hooks)
     }
     printf("tracked %s at %s (%s)\n", rec.name[0] ? rec.name : game_id,
            rec.install_dir, exec_rel);
+    if (vapor_saves_before_play(vc, &m, rec.install_dir) != 0) {
+        vapor_manifest_free(&m);
+        return -1;
+    }
     vapor_manifest_free(&m);
     if (hooks && hooks->cb) {
         (void)hooks->cb(hooks->ud, 90, 90);
@@ -3262,6 +3270,27 @@ uninstall_game_impl(vapor_client *vc, const char *game_id, vapor_progress_fn cb,
                rec.name[0] ? rec.name : game_id,
                rec.launch_exe[0] ? rec.launch_exe : rec.install_dir);
         return 0;
+    }
+    {
+        vapor_manifest save_m;
+        int             have_manifest;
+
+        vapor_manifest_init(&save_m);
+        have_manifest = (vapor_read_local_manifest(vc, game_id, &save_m) == 0);
+        if (!have_manifest) {
+            vc->err[0] = '\0';
+            save_m.id = vapor_strdup(game_id);
+            if (!save_m.id) {
+                vapor_client_set_error(vc, "out of memory");
+                return -1;
+            }
+        }
+        if (rec.install_dir[0]
+            && vapor_saves_before_uninstall(vc, &save_m, rec.install_dir) != 0) {
+            vapor_manifest_free(&save_m);
+            return -1;
+        }
+        vapor_manifest_free(&save_m);
     }
     if (install_dir_for(vc, game_id, library_dir, sizeof(library_dir)) != 0) {
         return -1;

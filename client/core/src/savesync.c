@@ -261,13 +261,35 @@ put_archive(vapor_client *vc, const char *game_id, int64_t revision,
 static int
 sync_wanted(vapor_client *vc, const vapor_manifest *m)
 {
-    if (!m || m->nsaves == 0 || !m->id) {
+    if (!m || !m->id || !m->id[0]) {
         return 0;
     }
     if (!vapor_client_has_token(vc)) {
         return 0;
     }
     return 1;
+}
+
+/* Download the account zip when one exists. 0 and writes `dest`, 1 when the
+ * account has no save, -1 on error. */
+static int
+download_account(vapor_client *vc, const char *game_id, const char *dest,
+                 int64_t *revision, char *sha, size_t shasz)
+{
+    char api[256];
+    int  meta;
+
+    meta = fetch_meta(vc, game_id, revision, sha, shasz);
+    if (meta != 0) {
+        return meta;
+    }
+    remove(dest);
+    snprintf(api, sizeof(api), "/api/v1/me/saves/%s/blob", game_id);
+    if (vapor_http_download(vc, api, dest, NULL, NULL) != 0) {
+        remove(dest);
+        return -1;
+    }
+    return 0;
 }
 
 int
@@ -343,11 +365,10 @@ vapor_saves_after_play(vapor_client *vc, const vapor_manifest *m,
     char     zip[VAPOR_PATH_MAX];
     char     err[512];
     char     sha[VAPOR_SHA256_HEX_LEN + 1];
-    char     local_sha[VAPOR_SHA256_HEX_LEN + 1];
     char     remote_sha[VAPOR_SHA256_HEX_LEN + 1];
     int64_t  local_rev = 0, new_rev = 0, remote_rev = 0;
     int      missing = 0;
-    int      put;
+    int      put = -1;
     void    *body = NULL;
     size_t   body_len = 0;
 
@@ -365,54 +386,118 @@ vapor_saves_after_play(vapor_client *vc, const vapor_manifest *m,
     }
     err[0] = '\0';
     remove(zip);
-    if (vapor_saves_pack((const char *const *)m->saves, m->nsaves, install_dir,
-                         zip, &missing, err, sizeof(err))
+    if (vapor_saves_pack(m->nsaves ? (const char *const *)m->saves : NULL,
+                         m->nsaves, install_dir, zip, &missing, err, sizeof(err))
         != 0) {
         remove(zip);
         vapor_client_set_error(vc, "%s", err[0] ? err : "cannot pack saves");
         return -1;
     }
-    if (missing) {
-        remove(zip);
-        printf("account saves: %s\n", err[0] ? err : "a save path is missing");
+    if (missing && err[0]) {
+        printf("account saves: %s\n", err);
         fflush(stdout);
+    }
+    /* No local save directory and no authored path on this machine. Leave
+     * the account copy alone so an unplugged drive cannot wipe it. */
+    if (!vapor_plat_exists(zip)) {
         return 0;
     }
-    read_state(state, &local_rev, local_sha, sizeof(local_sha));
-    if (vapor_sha256_file(zip, sha) != 0) {
-        remove(zip);
-        vapor_client_set_error(vc, "cannot hash save archive");
-        return -1;
-    }
-    if (local_rev > 0 && strcmp(sha, local_sha) == 0) {
-        remove(zip);
-        return 0;
-    }
-    if (read_file_bytes(zip, &body, &body_len, err, sizeof(err)) != 0) {
-        remove(zip);
-        vapor_client_set_error(vc, "%s", err);
-        return -1;
-    }
-    printf("uploading account saves for %s\n", m->id);
-    fflush(stdout);
-    put = put_archive(vc, m->id, local_rev, body, body_len, &new_rev, remote_sha,
-                      sizeof(remote_sha));
-    if (put == 1) {
-        /* The other machine finished later. Take its revision and replace it,
-         * which is the exiting player's copy. */
-        if (fetch_meta(vc, m->id, &remote_rev, remote_sha, sizeof(remote_sha)) < 0) {
-            free(body);
+    {
+        char    account[VAPOR_PATH_MAX];
+        char    merged[VAPOR_PATH_MAX];
+        char   *upload_path = zip;
+        int     have_account;
+
+        if (join2(account, sizeof(account), dir, "saves-account.zip") != 0
+            || join2(merged, sizeof(merged), dir, "saves-merged.zip") != 0) {
+            remove(zip);
+            vapor_client_set_error(vc, "save path is too long");
+            return -1;
+        }
+        remove(account);
+        remove(merged);
+        have_account = download_account(vc, m->id, account, &remote_rev,
+                                        remote_sha, sizeof(remote_sha));
+        if (have_account < 0) {
             remove(zip);
             return -1;
         }
-        if (remote_rev == 0) {
-            remote_rev = 0;
+        if (have_account == 0) {
+            err[0] = '\0';
+            if (vapor_saves_merge(zip, account, merged, err, sizeof(err)) != 0) {
+                remove(zip);
+                remove(account);
+                vapor_client_set_error(vc, "%s",
+                                       err[0] ? err : "cannot merge saves");
+                return -1;
+            }
+            upload_path = merged;
+            local_rev = remote_rev;
+        } else {
+            local_rev = 0;
+            remote_sha[0] = '\0';
         }
-        put = put_archive(vc, m->id, remote_rev, body, body_len, &new_rev,
+        if (vapor_sha256_file(upload_path, sha) != 0) {
+            remove(zip);
+            remove(account);
+            remove(merged);
+            vapor_client_set_error(vc, "cannot hash save archive");
+            return -1;
+        }
+        if (have_account == 0 && strcmp(sha, remote_sha) == 0) {
+            remove(zip);
+            remove(account);
+            remove(merged);
+            if (write_state(dir, state, remote_rev, remote_sha) != 0) {
+                vapor_client_set_error(vc, "cannot record the save revision");
+                return -1;
+            }
+            return 0;
+        }
+        if (read_file_bytes(upload_path, &body, &body_len, err, sizeof(err)) != 0) {
+            remove(zip);
+            remove(account);
+            remove(merged);
+            vapor_client_set_error(vc, "%s", err);
+            return -1;
+        }
+        printf("uploading account saves for %s\n", m->id);
+        fflush(stdout);
+        put = put_archive(vc, m->id, local_rev, body, body_len, &new_rev,
                           remote_sha, sizeof(remote_sha));
+        if (put == 1) {
+            /* The other machine finished later. Merge on top of its archive
+             * and replace that, which keeps both machines' slots. */
+            free(body);
+            body = NULL;
+            remove(account);
+            remove(merged);
+            if (download_account(vc, m->id, account, &remote_rev, remote_sha,
+                                 sizeof(remote_sha))
+                != 0) {
+                remove(zip);
+                remove(account);
+                return -1;
+            }
+            if (vapor_saves_merge(zip, account, merged, err, sizeof(err)) != 0
+                || read_file_bytes(merged, &body, &body_len, err, sizeof(err))
+                       != 0) {
+                free(body);
+                remove(zip);
+                remove(account);
+                remove(merged);
+                vapor_client_set_error(vc, "%s",
+                                       err[0] ? err : "cannot merge saves");
+                return -1;
+            }
+            put = put_archive(vc, m->id, remote_rev, body, body_len, &new_rev,
+                              remote_sha, sizeof(remote_sha));
+        }
+        free(body);
+        remove(zip);
+        remove(account);
+        remove(merged);
     }
-    free(body);
-    remove(zip);
     if (put != 0) {
         if (!vc->err[0]) {
             vapor_client_set_error(vc, "could not upload saves");
@@ -425,4 +510,50 @@ vapor_saves_after_play(vapor_client *vc, const vapor_manifest *m,
         return -1;
     }
     return 0;
+}
+
+int
+vapor_saves_before_uninstall(vapor_client *vc, const vapor_manifest *m,
+                             const char *install_dir)
+{
+    char zip[VAPOR_PATH_MAX];
+    char dir[VAPOR_PATH_MAX];
+    char err[512];
+    int  missing = 0;
+
+    if (!m || !m->id || !install_dir || !install_dir[0]) {
+        return 0;
+    }
+    if (join2(dir, sizeof(dir), install_dir, ".vapor") != 0
+        || join2(zip, sizeof(zip), dir, "saves-probe.zip") != 0) {
+        vapor_client_set_error(vc, "save path is too long");
+        return -1;
+    }
+    if (vapor_plat_mkdirs(dir) != 0) {
+        vapor_client_set_error(vc, "cannot create %s", dir);
+        return -1;
+    }
+    err[0] = '\0';
+    remove(zip);
+    if (vapor_saves_pack(m->nsaves ? (const char *const *)m->saves : NULL,
+                         m->nsaves, install_dir, zip, &missing, err, sizeof(err))
+        != 0) {
+        remove(zip);
+        vapor_client_set_error(vc, "%s", err[0] ? err : "cannot pack saves");
+        return -1;
+    }
+    if (!vapor_plat_exists(zip)) {
+        return 0;
+    }
+    remove(zip);
+    if (!vapor_client_has_token(vc)) {
+        vapor_client_set_error(vc,
+                               "sign in before removing %s so its saves can be "
+                               "stored on the account",
+                               m->id);
+        return -1;
+    }
+    printf("storing account saves for %s before remove\n", m->id);
+    fflush(stdout);
+    return vapor_saves_after_play(vc, m, install_dir);
 }

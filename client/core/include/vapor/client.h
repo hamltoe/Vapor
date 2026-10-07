@@ -317,5 +317,9 @@ int vapor_saves_before_play(vapor_client *vc, const vapor_manifest *m,
                             const char *install_dir);
 int vapor_saves_after_play(vapor_client *vc, const vapor_manifest *m,
                            const char *install_dir);
+/* Upload saves before Remove deletes them. A signed-out client with local
+ * saves fails instead of throwing those files away. */
+int vapor_saves_before_uninstall(vapor_client *vc, const vapor_manifest *m,
+                                 const char *install_dir);
 
 #endif /* VAPOR_CLIENT_H */

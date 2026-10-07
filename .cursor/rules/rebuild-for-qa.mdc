@@ -1,0 +1,24 @@
+---
+description: Rebuild QA binaries after a user-visible feature or tweak
+alwaysApply: true
+---
+
+# Rebuild for QA
+
+After a change QA can exercise (install, launch, saves, catalog, GUI, server, or client behavior), rebuild before finishing. Docs-only and comment-only edits do not need a rebuild.
+
+From the repo root:
+
+```
+powershell -File scripts/build-windows.ps1
+powershell -File scripts/build-windows-xp.ps1
+wsl -e bash scripts/build-linux.sh
+```
+
+Outputs:
+
+- `build-windows\bin` — current Windows client (`vapor-gui.exe`, `vapor.exe`, `vapor-selftest.exe`)
+- `build-windows-xp\bin` — Windows XP SP3 client; copy that whole directory
+- `build-linux/bin` — `vapord`, `vapor-admin`, and the Linux client
+
+If WSL or the MinGW XP toolchain is missing, say which build did not run. Report the directories and binary names when the builds finish.
