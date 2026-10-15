@@ -299,6 +299,42 @@ int vapor_read_local_manifest(vapor_client *vc, const char *game_id,
  * database, launch target present. 0 if clean, 1 if problems, -1 on error. */
 int vapor_verify_install(vapor_client *vc, const char *game_id);
 
+/* -------------------------------------------------------------------- mods */
+typedef struct {
+    char     id[VAPOR_ID_MAX + 1];
+    char     name[256];
+    char     description[VAPOR_DESC_MAX];
+    char     latest_version[VAPOR_VERSION_MAX + 1];
+    char     installed_version[VAPOR_VERSION_MAX + 1];
+    uint64_t size;
+    int      has_cover;
+    int      downloaded; /* the zip is on this computer */
+    int      enabled;
+    int      sort_order;
+} vapor_mod_entry;
+
+/* Caller frees *out with free(). Merges the server list with local state. */
+int  vapor_mods_fetch(vapor_client *vc, const char *game_id,
+                      vapor_mod_entry **out, size_t *count);
+/* Download a mod, enable it, and rebuild the install from the original files
+ * plus every enabled mod. The game must already be installed and set up. */
+int  vapor_mod_install(vapor_client *vc, const char *game_id, const char *mod_id);
+/* Disable the mod, rebuild, and delete the downloaded zip. */
+int  vapor_mod_remove(vapor_client *vc, const char *game_id, const char *mod_id);
+int  vapor_mod_set_enabled(vapor_client *vc, const char *game_id,
+                           const char *mod_id, int enabled);
+/* Turn every mod off and put the install back to its original files. */
+int  vapor_mod_restore(vapor_client *vc, const char *game_id);
+/* After a game install or update the tree is original again. Clears the
+ * enabled flags and drops any leftover apply log. Downloads stay. */
+int  vapor_mods_clear_enabled(vapor_client *vc, const char *game_id);
+/* Forget local mod state and downloads for a game that was removed. */
+int  vapor_mods_forget_game(vapor_client *vc, const char *game_id);
+/* 0 when an enabled mod overrides launch (caller frees *out). 1 when Play
+ * should use the game's own target. -1 on error. */
+int  vapor_mod_launch_override(vapor_client *vc, const char *game_id,
+                               vapor_mod_manifest *out);
+
 /* ------------------------------------------------------------------ launch */
 /* Runs the game and blocks until it exits. *out_exit gets the process exit
  * code. Playtime is recorded automatically. Copy-protected disc wrappers

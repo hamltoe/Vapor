@@ -53,10 +53,18 @@ u32le(const unsigned char *p)
            | ((uint32_t)p[3] << 24);
 }
 
+static uint64_t
+u64le(const unsigned char *p)
+{
+    return (uint64_t)u32le(p) | ((uint64_t)u32le(p + 4) << 32);
+}
+
 /* A raw CD sector is larger than the 2048-byte ISO logical block. `raw` is
- * the stride on disk; `skip` is where the user data starts inside it. */
+ * the stride on disk; `skip` is where the user data starts inside it.
+ * `base` is the first byte of that track (0, or an Alcohol .mdf offset). */
 typedef struct {
     FILE    *f;
+    uint64_t base;
     uint32_t raw;
     uint32_t skip;
 } iso_image;
@@ -118,6 +126,202 @@ detect_layout(FILE *f, uint32_t *raw, uint32_t *skip)
     return -1;
 }
 
+/* Alcohol 120% .mds (versions 1.3–1.5). The .mdf is the sector dump; the
+ * sidecar names each track's byte offset and sector size. */
+#define MDS_MAGIC "MEDIA DESCRIPTOR"
+#define MDS_HDR 0x58u
+#define MDS_SESSION 0x18u
+#define MDS_TRACK 0x50u
+
+static int
+mds_sector_ok(uint32_t n)
+{
+    return n == 2048u || n == 2324u || n == 2336u || n == 2352u || n == 2448u;
+}
+
+static int
+read_exact(FILE *f, long long off, void *dst, size_t n)
+{
+    if (off < 0 || FSEEK64(f, off, SEEK_SET) != 0) {
+        return -1;
+    }
+    if (fread(dst, 1, n, f) != n) {
+        return -1;
+    }
+    return 0;
+}
+
+/* User-data skip is decided by CD001, not the track mode. Alcohol stores
+ * Mode 1 as either a 2048-byte payload or a raw 2352-byte sector. */
+static int
+probe_user_skip(FILE *f, uint64_t base, uint32_t raw, uint32_t *out_skip)
+{
+    static const uint32_t skips[] = { 0u, 16u, 24u, 8u };
+    size_t                i;
+
+    for (i = 0; i < sizeof(skips) / sizeof(skips[0]); i++) {
+        long long off;
+
+        if (skips[i] >= raw) {
+            continue;
+        }
+        off = (long long)base + 16ll * (long long)raw + (long long)skips[i];
+        if (cd001_at(f, off)) {
+            *out_skip = skips[i];
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* Sibling of `Game.mdf` is `Game.mds`, matching the extension's letter case,
+ * then the other common casings. */
+static FILE *
+open_sibling_mds(const char *mdf_path)
+{
+    char        path[1024];
+    const char *dot = NULL;
+    const char *p;
+    size_t      stem;
+    char        primary[5];
+    static const char *alts[] = { ".mds", ".MDS", ".Mds" };
+    size_t      i;
+    FILE       *f;
+
+    if (!mdf_path) {
+        return NULL;
+    }
+    for (p = mdf_path; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            dot = NULL;
+        } else if (*p == '.') {
+            dot = p;
+        }
+    }
+    if (!dot || dot[1] == '\0' || dot[2] == '\0' || dot[3] == '\0' || dot[4] != '\0') {
+        return NULL;
+    }
+    if ((dot[1] != 'm' && dot[1] != 'M') || (dot[2] != 'd' && dot[2] != 'D')
+        || (dot[3] != 'f' && dot[3] != 'F')) {
+        return NULL;
+    }
+    stem = (size_t)(dot - mdf_path);
+    if (stem + 4 >= sizeof(path)) {
+        return NULL;
+    }
+    memcpy(path, mdf_path, stem);
+    primary[0] = '.';
+    primary[1] = dot[1];
+    primary[2] = dot[2];
+    primary[3] = (dot[3] == 'F') ? 'S' : 's';
+    primary[4] = '\0';
+    memcpy(path + stem, primary, 5);
+    f = fopen(path, "rb");
+    if (f) {
+        return f;
+    }
+    for (i = 0; i < sizeof(alts) / sizeof(alts[0]); i++) {
+        if (strcmp(alts[i], primary) == 0) {
+            continue;
+        }
+        memcpy(path + stem, alts[i], 5);
+        f = fopen(path, "rb");
+        if (f) {
+            return f;
+        }
+    }
+    return NULL;
+}
+
+/* 0 when a data track contains an ISO 9660 filesystem. -1 means there is
+ * no usable sidecar and the caller should probe the file from byte 0. */
+static int
+layout_from_mds(FILE *mdf, const char *mdf_path, uint64_t *base, uint32_t *raw,
+                uint32_t *skip)
+{
+    FILE         *mds;
+    unsigned char hdr[MDS_HDR];
+    uint16_t      nsess;
+    uint32_t      sess_at;
+    unsigned      s;
+
+    mds = open_sibling_mds(mdf_path);
+    if (!mds) {
+        return -1;
+    }
+    if (fread(hdr, 1, sizeof(hdr), mds) != sizeof(hdr)
+        || memcmp(hdr, MDS_MAGIC, 16) != 0) {
+        fclose(mds);
+        return -1;
+    }
+    nsess = u16le(hdr + 0x14);
+    sess_at = u32le(hdr + 0x50);
+    if (nsess == 0 || nsess > 32) {
+        fclose(mds);
+        return -1;
+    }
+    for (s = 0; s < nsess; s++) {
+        unsigned char sess[MDS_SESSION];
+        uint32_t      data_at;
+        unsigned      nblk, b;
+
+        if (read_exact(mds, (long long)sess_at + (long long)s * MDS_SESSION, sess,
+                       sizeof(sess))
+            != 0) {
+            break;
+        }
+        nblk = sess[0x0A];
+        data_at = u32le(sess + 0x14);
+        if (nblk > 128) {
+            nblk = 128;
+        }
+        for (b = 0; b < nblk; b++) {
+            unsigned char trk[MDS_TRACK];
+            unsigned      mode, point;
+            uint32_t      sec, user_skip;
+            uint64_t      off;
+
+            if (read_exact(mds, (long long)data_at + (long long)b * MDS_TRACK, trk,
+                           sizeof(trk))
+                != 0) {
+                break;
+            }
+            mode = trk[0];
+            point = trk[4];
+            /* Point 1..99 is a real track. 0x00 is lead-in; 0xA9 is audio. */
+            if (point < 1 || point > 99 || mode == 0x00 || mode == 0xA9) {
+                continue;
+            }
+            sec = u16le(trk + 0x10);
+            if (!mds_sector_ok(sec)) {
+                continue;
+            }
+            off = u64le(trk + 0x28);
+            if (probe_user_skip(mdf, off, sec, &user_skip) == 0) {
+                *base = off;
+                *raw = sec;
+                *skip = user_skip;
+                fclose(mds);
+                return 0;
+            }
+        }
+    }
+    fclose(mds);
+    return -1;
+}
+
+static int
+detect_image_layout(FILE *f, const char *path, uint64_t *base, uint32_t *raw,
+                    uint32_t *skip)
+{
+    *base = 0;
+    if (layout_from_mds(f, path, base, raw, skip) == 0) {
+        return 0;
+    }
+    *base = 0;
+    return detect_layout(f, raw, skip);
+}
+
 /* Read `n` logical bytes starting `logical_off` into the extent at `lba`.
  * Raw images are not contiguous, so this stops at each sector boundary. */
 static int
@@ -135,7 +339,8 @@ read_user(iso_image *img, uint32_t lba, uint32_t logical_off, void *dst,
         if (chunk > n) {
             chunk = n;
         }
-        off = (long long)(lba + block) * (long long)img->raw
+        off = (long long)img->base
+              + (long long)(lba + block) * (long long)img->raw
               + (long long)img->skip + (long long)into;
         if (FSEEK64(img->f, off, SEEK_SET) != 0
             || fread(out, 1, chunk, img->f) != chunk) {
@@ -445,6 +650,7 @@ int
 vapor_iso_is_image(const char *path)
 {
     FILE    *f;
+    uint64_t base;
     uint32_t raw, skip;
     int      ok;
 
@@ -455,7 +661,7 @@ vapor_iso_is_image(const char *path)
     if (!f) {
         return 0;
     }
-    ok = detect_layout(f, &raw, &skip) == 0;
+    ok = detect_image_layout(f, path, &base, &raw, &skip) == 0;
     fclose(f);
     return ok;
 }
@@ -486,7 +692,8 @@ vapor_iso_extract_progress(const char *iso_path, const char *dest_dir,
         set_err(err, errsz, "cannot open ISO image");
         return -1;
     }
-    if (detect_layout(img.f, &img.raw, &img.skip) != 0) {
+    if (detect_image_layout(img.f, iso_path, &img.base, &img.raw, &img.skip)
+        != 0) {
         fclose(img.f);
         set_err(err, errsz, "not an ISO 9660 disc image");
         return -1;

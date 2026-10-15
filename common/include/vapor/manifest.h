@@ -91,4 +91,32 @@ const vapor_target *vapor_manifest_pick_target(const vapor_manifest *m,
 const char *vapor_host_platform(void);
 const char *vapor_host_arch(void);
 
+/* A community mod is its own schema-1 document. It is not a game manifest.
+ * The zip is a tree of files relative to the game install directory. `exec`,
+ * `args`, and `cwd` are optional launch overrides. */
+#define VAPOR_MOD_SCHEMA 1
+
+typedef struct {
+    int      schema;
+    char    *id;
+    char    *game_id; /* catalog game this mod belongs to; optional on disk */
+    char    *name;
+    char    *version;
+    char    *description;
+    char    *cover;
+    vapor_package package;
+    char    *exec;
+    char   **args;
+    size_t   nargs;
+    char    *cwd;
+    char   **exec_bits;
+    size_t   nexec_bits;
+} vapor_mod_manifest;
+
+void vapor_mod_manifest_init(vapor_mod_manifest *m);
+void vapor_mod_manifest_free(vapor_mod_manifest *m);
+int  vapor_mod_manifest_parse(const char *json, size_t len,
+                              vapor_mod_manifest *out, char *err, size_t errsz);
+char *vapor_mod_manifest_serialize(const vapor_mod_manifest *m);
+
 #endif /* VAPOR_MANIFEST_H */

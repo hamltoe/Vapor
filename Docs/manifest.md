@@ -72,10 +72,11 @@ If a game later needs symlinks or fine-grained permissions, swap miniz
 for libarchive and package `.tar.zst`. `package.format` already exists
 so zip, iso, and other payloads can coexist.
 
-vapord unpacks each `.iso`, `.img`, and BIN/CUE `.bin` it finds in a game
+vapord unpacks each `.iso`, `.img`, BIN/CUE `.bin`, and Alcohol `.mdf` it finds in a game
 folder (ISO 9660 and Joliet, including raw 2352-byte sectors) into one
 tree and zips those files for the client. Several disc images in the same
-folder are merged, later discs overlaying same-named files. A `.bin` that
+folder are merged, later discs overlaying same-named files. A sibling
+`.mds` supplies an `.mdf` data-track offset and is not packaged. A `.bin` that
 is not a disc image (a Linux binary, or other data) is left as a normal
 file. If a disc includes a
 Wise `SETUP.EXE` (Half-Life GOTY and similar 1999–2003 Sierra installers),
@@ -206,7 +207,7 @@ vapord scans `library_root` and publishes each subdirectory. See
 2. Stream the archive to `<library>/.vapor/downloads/` with Range resume.
 3. Verify SHA-256 against the manifest.
 4. Extract a zip with miniz, then inspect the tree. A leftover `.iso`,
-   `.img`, or BIN/CUE `.bin`, or a legacy `package.format` of `iso`, is
+   `.img`, BIN/CUE `.bin`, or Alcohol `.mdf`, or a legacy `package.format` of `iso`, is
    extracted into
    `<library>/.vapor/mnt/<id>` for reading. It is not opened with the
    shell. A portable tree is then copied into `<library>/<id>` and the
@@ -315,3 +316,75 @@ The catalog marks `update_available` when the server's latest version
 compares greater than the installed version. The CLI prints
 `[update available]`; the GUI turns Verify into Update. Install of the
 new version is a normal `--force` install over the same directory.
+That replaces the install tree, which drops any files a mod had written.
+Downloaded mod zips are kept, and the enabled flags are cleared so the
+details page can offer them again.
+
+## Mods
+
+A mod is a separate schema-1 document, not a game manifest. Game schema
+stays 1. The parser is `vapor_mod_manifest_parse` in
+`common/src/manifest.c`.
+
+Drop a folder under the game in `library_root`. Discovery ignores that
+`mods/` directory when it fingerprints and packages the game, so adding
+a mod does not republish the title.
+
+```
+library_root/Doom/
+  doom.zip
+  mods/
+    Brutal Doom/
+      vapor.json
+      brutalv21.pk3
+```
+
+`vapor.json` in the mod folder:
+
+```json
+{
+  "id": "brutal-doom",
+  "name": "Brutal Doom",
+  "version": "21",
+  "description": "Gameplay mod.",
+  "exec": "gzdoom.exe",
+  "args": ["-file", "brutalv21.pk3"]
+}
+```
+
+`id` uses the same rules as a game id. `version` uses the same rules as
+a game version. `exec`, `args`, `cwd`, and `exec_bits` are optional and
+relative to the install directory. A path that is absolute, contains
+`..`, or sits under `.vapor` is rejected.
+
+Loose files are zipped into
+`content_root/<game_id>/mods/<mod_id>/<version>/package.zip` beside
+`manifest.json`. A zip already in the mod folder is the package and is
+served in place. Zip-slip rules match game extract. An optional cover
+is `cover.png`, `cover.jpg`, or `cover.jpeg`, or the filename named by
+`cover`.
+
+The published manifest adds `schema`, `game_id`, and `package`
+(`file`, `format` `zip`, `size`, `sha256`).
+
+Several mods may be enabled at once. Any change to that set restores
+the original files first, then reapplies the remaining mods in list
+order. The last enabled mod that sets `exec` or `args` is what Play
+uses. If that mod sets only `args`, the game executable stays and the
+arguments are replaced.
+
+The client stores downloads in `<library>/.vapor/mods/<game_id>/`,
+outside the install tree. Inside the install, `.vapor/vanilla/` holds
+the original bytes of any file a mod replaced (written once, from the
+unmodified file) and `.vapor/mod-applied.json` lists the relative paths
+and whether each one had an original. Restore copies those backups back
+and deletes paths the mods added, including empty directories they
+created.
+
+External shortcuts have no mods. `os_product` mods write into the
+recorded product directory. `portable` and `runtime` mods write into
+`<library>/<id>`. Setup must already be `completed`.
+
+`vapor mods <id>` lists them. `vapor mod install|remove|enable|disable`
+and `vapor restore <id>` change the set. The details page shows the
+same actions under the description. The grid stays a game browser.

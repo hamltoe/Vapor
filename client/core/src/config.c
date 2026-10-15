@@ -267,6 +267,15 @@ static const char LOCAL_SCHEMA[] =
     "  game_id    TEXT NOT NULL,"
     "  started_at INTEGER NOT NULL,"
     "  seconds    INTEGER NOT NULL"
+    ");"
+    "CREATE TABLE IF NOT EXISTS mod_state ("
+    "  game_id    TEXT NOT NULL,"
+    "  mod_id     TEXT NOT NULL,"
+    "  version    TEXT NOT NULL,"
+    "  name       TEXT NOT NULL DEFAULT '',"
+    "  enabled    INTEGER NOT NULL DEFAULT 0,"
+    "  sort_order INTEGER NOT NULL DEFAULT 0,"
+    "  PRIMARY KEY (game_id, mod_id)"
     ");";
 
 int

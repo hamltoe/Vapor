@@ -81,6 +81,27 @@ static const char *const MIGRATIONS[] = {
     "  created_at INTEGER NOT NULL,"
     "  PRIMARY KEY (user_id, game_id)"
     ")",
+    "CREATE TABLE IF NOT EXISTS mods ("
+    "  game_id        TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,"
+    "  mod_id         TEXT NOT NULL,"
+    "  version        TEXT NOT NULL,"
+    "  package_file   TEXT NOT NULL,"
+    "  package_size   INTEGER NOT NULL,"
+    "  package_sha256 TEXT NOT NULL,"
+    "  manifest_json  TEXT NOT NULL,"
+    "  cover          TEXT,"
+    "  source_path    TEXT,"
+    "  created_at     INTEGER NOT NULL,"
+    "  PRIMARY KEY (game_id, mod_id, version)"
+    ")",
+    "CREATE TABLE IF NOT EXISTS discovered_mods ("
+    "  game_id     TEXT NOT NULL REFERENCES games(id) ON DELETE CASCADE,"
+    "  folder      TEXT NOT NULL,"
+    "  mod_id      TEXT NOT NULL,"
+    "  fingerprint TEXT NOT NULL,"
+    "  version     TEXT NOT NULL,"
+    "  PRIMARY KEY (game_id, folder)"
+    ")",
 };
 
 int
@@ -1292,4 +1313,468 @@ vapord_save_store(sqlite3 *db, int64_t user_id, const char *game_id,
     rc = sqlite3_step(st);
     sqlite3_finalize(st);
     return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_mod_upsert(sqlite3 *db, const vapor_mod_manifest *m,
+                  const char *manifest_json, const char *source_path)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO mods (game_id, mod_id, version,"
+                           "   package_file, package_size, package_sha256,"
+                           "   manifest_json, cover, source_path, created_at)"
+                           " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                           " ON CONFLICT(game_id, mod_id, version) DO UPDATE SET"
+                           "   package_file = excluded.package_file,"
+                           "   package_size = excluded.package_size,"
+                           "   package_sha256 = excluded.package_sha256,"
+                           "   manifest_json = excluded.manifest_json,"
+                           "   cover = excluded.cover,"
+                           "   source_path = excluded.source_path,"
+                           "   created_at = excluded.created_at",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, m->game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, m->id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, m->version, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, m->package.file, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 5, (sqlite3_int64)m->package.size);
+    sqlite3_bind_text(st, 6, m->package.sha256, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 7, manifest_json, -1, SQLITE_STATIC);
+    if (m->cover && m->cover[0]) {
+        sqlite3_bind_text(st, 8, m->cover, -1, SQLITE_STATIC);
+    } else {
+        sqlite3_bind_null(st, 8);
+    }
+    if (source_path && source_path[0]) {
+        sqlite3_bind_text(st, 9, source_path, -1, SQLITE_STATIC);
+    } else {
+        sqlite3_bind_null(st, 9);
+    }
+    sqlite3_bind_int64(st, 10, vapor_now_unix());
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_mod_delete(sqlite3 *db, const char *game_id, const char *mod_id)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (sqlite3_prepare_v2(db, "DELETE FROM mods WHERE game_id = ? AND mod_id = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, mod_id, -1, SQLITE_STATIC);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_mod_latest_version(sqlite3 *db, const char *game_id, const char *mod_id,
+                          char *out, size_t outsz)
+{
+    sqlite3_stmt *st = NULL;
+    int           found = 0;
+
+    if (!out || outsz == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    if (sqlite3_prepare_v2(db,
+                           "SELECT version FROM mods WHERE game_id = ? AND mod_id = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, mod_id, -1, SQLITE_STATIC);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *ver = (const char *)sqlite3_column_text(st, 0);
+
+        if (!ver) {
+            continue;
+        }
+        if (!found || vapor_version_cmp(ver, out) > 0) {
+            snprintf(out, outsz, "%s", ver);
+            found = 1;
+        }
+    }
+    sqlite3_finalize(st);
+    return found ? 0 : 1;
+}
+
+int
+vapord_mod_manifest(sqlite3 *db, const char *game_id, const char *mod_id,
+                    const char *version, char **out_json)
+{
+    sqlite3_stmt *st = NULL;
+    char          latest[VAPOR_VERSION_MAX + 1];
+    const char   *use = version;
+
+    *out_json = NULL;
+    if (version && strcmp(version, "latest") == 0) {
+        if (vapord_mod_latest_version(db, game_id, mod_id, latest, sizeof(latest))
+            != 0) {
+            return 1;
+        }
+        use = latest;
+    }
+    if (sqlite3_prepare_v2(db,
+                           "SELECT manifest_json FROM mods"
+                           " WHERE game_id = ? AND mod_id = ? AND version = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, mod_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, use, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *json = (const char *)sqlite3_column_text(st, 0);
+        if (json) {
+            *out_json = vapor_strdup(json);
+        }
+    }
+    sqlite3_finalize(st);
+    return *out_json ? 0 : 1;
+}
+
+int
+vapord_mod_source(sqlite3 *db, const char *game_id, const char *mod_id,
+                  const char *version, char *out, size_t outsz)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc = -1;
+
+    if (out && outsz) {
+        out[0] = '\0';
+    }
+    if (sqlite3_prepare_v2(db,
+                           "SELECT source_path FROM mods"
+                           " WHERE game_id = ? AND mod_id = ? AND version = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, mod_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, version, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *src = (const char *)sqlite3_column_text(st, 0);
+
+        if (src && src[0] && out) {
+            snprintf(out, outsz, "%s", src);
+            rc = 0;
+        } else {
+            rc = 1;
+        }
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
+int
+vapord_mod_cover(sqlite3 *db, const char *game_id, const char *mod_id,
+                 const char *version, char *out, size_t outsz)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc = 1;
+
+    if (out && outsz) {
+        out[0] = '\0';
+    }
+    if (sqlite3_prepare_v2(db,
+                           "SELECT cover FROM mods"
+                           " WHERE game_id = ? AND mod_id = ? AND version = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, mod_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, version, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *cover = (const char *)sqlite3_column_text(st, 0);
+
+        if (cover && cover[0] && out) {
+            snprintf(out, outsz, "%s", cover);
+            rc = 0;
+        }
+    } else {
+        rc = -1;
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
+cJSON *
+vapord_mods_json(sqlite3 *db, const char *game_id)
+{
+    sqlite3_stmt *st = NULL;
+    cJSON        *root = NULL;
+    cJSON        *arr = NULL;
+    typedef struct {
+        char    id[VAPOR_ID_MAX + 1];
+        char    version[VAPOR_VERSION_MAX + 1];
+        char   *manifest;
+        int64_t size;
+        char    sha[VAPOR_SHA256_HEX_LEN + 1];
+        int     has_cover;
+    } mod_pick;
+    mod_pick *picks = NULL;
+    size_t    np = 0, cap = 0, i;
+
+    if (sqlite3_prepare_v2(db,
+                           "SELECT mod_id, version, package_size, package_sha256,"
+                           "       manifest_json, cover FROM mods WHERE game_id = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return NULL;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *id = (const char *)sqlite3_column_text(st, 0);
+        const char *ver = (const char *)sqlite3_column_text(st, 1);
+        const char *sha = (const char *)sqlite3_column_text(st, 3);
+        const char *man = (const char *)sqlite3_column_text(st, 4);
+        const char *cover = (const char *)sqlite3_column_text(st, 5);
+        size_t      slot = np;
+        int         found = 0;
+
+        if (!id || !ver || !man) {
+            continue;
+        }
+        for (i = 0; i < np; i++) {
+            if (strcmp(picks[i].id, id) == 0) {
+                slot = i;
+                found = 1;
+                break;
+            }
+        }
+        if (found && vapor_version_cmp(ver, picks[slot].version) <= 0) {
+            continue;
+        }
+        if (!found) {
+            if (np == cap) {
+                size_t    ncap = cap ? cap * 2 : 8;
+                mod_pick *grown = (mod_pick *)realloc(picks, ncap * sizeof(*grown));
+                if (!grown) {
+                    sqlite3_finalize(st);
+                    goto fail;
+                }
+                picks = grown;
+                cap = ncap;
+            }
+            memset(&picks[np], 0, sizeof(picks[np]));
+            slot = np++;
+        } else {
+            free(picks[slot].manifest);
+            picks[slot].manifest = NULL;
+        }
+        snprintf(picks[slot].id, sizeof(picks[slot].id), "%s", id);
+        snprintf(picks[slot].version, sizeof(picks[slot].version), "%s", ver);
+        picks[slot].size = sqlite3_column_int64(st, 2);
+        snprintf(picks[slot].sha, sizeof(picks[slot].sha), "%s", sha ? sha : "");
+        picks[slot].manifest = vapor_strdup(man);
+        picks[slot].has_cover = cover && cover[0];
+        if (!picks[slot].manifest) {
+            sqlite3_finalize(st);
+            goto fail;
+        }
+    }
+    sqlite3_finalize(st);
+    st = NULL;
+
+    root = cJSON_CreateObject();
+    arr = cJSON_AddArrayToObject(root, "mods");
+    if (!root || !arr) {
+        goto fail;
+    }
+    for (i = 0; i < np; i++) {
+        cJSON *obj = cJSON_CreateObject();
+        cJSON *man = cJSON_Parse(picks[i].manifest);
+        const char *name = picks[i].id;
+        const char *desc = "";
+
+        if (!obj) {
+            goto fail;
+        }
+        cJSON_AddItemToArray(arr, obj);
+        if (man) {
+            const cJSON *n = cJSON_GetObjectItemCaseSensitive(man, "name");
+            const cJSON *d = cJSON_GetObjectItemCaseSensitive(man, "description");
+            if (cJSON_IsString(n) && n->valuestring && n->valuestring[0]) {
+                name = n->valuestring;
+            }
+            if (cJSON_IsString(d) && d->valuestring) {
+                desc = d->valuestring;
+            }
+        }
+        cJSON_AddStringToObject(obj, "id", picks[i].id);
+        cJSON_AddStringToObject(obj, "name", name);
+        cJSON_AddStringToObject(obj, "description", desc);
+        cJSON_AddStringToObject(obj, "latest_version", picks[i].version);
+        cJSON_AddNumberToObject(obj, "size", (double)picks[i].size);
+        cJSON_AddStringToObject(obj, "sha256", picks[i].sha);
+        cJSON_AddBoolToObject(obj, "has_cover", picks[i].has_cover);
+        cJSON_Delete(man);
+        free(picks[i].manifest);
+        picks[i].manifest = NULL;
+    }
+    free(picks);
+    return root;
+
+fail:
+    if (st) {
+        sqlite3_finalize(st);
+    }
+    if (picks) {
+        for (i = 0; i < np; i++) {
+            free(picks[i].manifest);
+        }
+        free(picks);
+    }
+    cJSON_Delete(root);
+    return NULL;
+}
+
+int
+vapord_discovered_mod_get(sqlite3 *db, const char *game_id, const char *folder,
+                          vapord_discovered_mod *out)
+{
+    sqlite3_stmt *st = NULL;
+
+    memset(out, 0, sizeof(*out));
+    if (sqlite3_prepare_v2(db,
+                           "SELECT folder, mod_id, fingerprint, version"
+                           " FROM discovered_mods WHERE game_id = ? AND folder = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, folder, -1, SQLITE_STATIC);
+    if (sqlite3_step(st) != SQLITE_ROW) {
+        sqlite3_finalize(st);
+        return 1;
+    }
+    snprintf(out->folder, sizeof(out->folder), "%s",
+             (const char *)sqlite3_column_text(st, 0));
+    snprintf(out->mod_id, sizeof(out->mod_id), "%s",
+             (const char *)sqlite3_column_text(st, 1));
+    snprintf(out->fingerprint, sizeof(out->fingerprint), "%s",
+             (const char *)sqlite3_column_text(st, 2));
+    snprintf(out->version, sizeof(out->version), "%s",
+             (const char *)sqlite3_column_text(st, 3));
+    sqlite3_finalize(st);
+    return 0;
+}
+
+int
+vapord_discovered_mod_put(sqlite3 *db, const char *game_id,
+                          const vapord_discovered_mod *row)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (sqlite3_prepare_v2(db,
+                           "INSERT INTO discovered_mods"
+                           " (game_id, folder, mod_id, fingerprint, version)"
+                           " VALUES (?, ?, ?, ?, ?)"
+                           " ON CONFLICT(game_id, folder) DO UPDATE SET"
+                           "   mod_id = excluded.mod_id,"
+                           "   fingerprint = excluded.fingerprint,"
+                           "   version = excluded.version",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, row->folder, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, row->mod_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, row->fingerprint, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 5, row->version, -1, SQLITE_STATIC);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_discovered_mod_delete(sqlite3 *db, const char *game_id,
+                             const char *folder)
+{
+    sqlite3_stmt *st = NULL;
+    int           rc;
+
+    if (sqlite3_prepare_v2(db,
+                           "DELETE FROM discovered_mods"
+                           " WHERE game_id = ? AND folder = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, folder, -1, SQLITE_STATIC);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+int
+vapord_discovered_mod_list(sqlite3 *db, const char *game_id,
+                           vapord_discovered_mod **out, size_t *count)
+{
+    sqlite3_stmt           *st = NULL;
+    vapord_discovered_mod  *rows = NULL;
+    size_t                  n = 0, cap = 0;
+
+    *out = NULL;
+    *count = 0;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT folder, mod_id, fingerprint, version"
+                           " FROM discovered_mods WHERE game_id = ?",
+                           -1, &st, NULL)
+        != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, game_id, -1, SQLITE_STATIC);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (n == cap) {
+            size_t ncap = cap ? cap * 2 : 8;
+            vapord_discovered_mod *grown =
+                (vapord_discovered_mod *)realloc(rows, ncap * sizeof(*grown));
+            if (!grown) {
+                sqlite3_finalize(st);
+                free(rows);
+                return -1;
+            }
+            rows = grown;
+            cap = ncap;
+        }
+        memset(&rows[n], 0, sizeof(rows[n]));
+        snprintf(rows[n].folder, sizeof(rows[n].folder), "%s",
+                 (const char *)sqlite3_column_text(st, 0));
+        snprintf(rows[n].mod_id, sizeof(rows[n].mod_id), "%s",
+                 (const char *)sqlite3_column_text(st, 1));
+        snprintf(rows[n].fingerprint, sizeof(rows[n].fingerprint), "%s",
+                 (const char *)sqlite3_column_text(st, 2));
+        snprintf(rows[n].version, sizeof(rows[n].version), "%s",
+                 (const char *)sqlite3_column_text(st, 3));
+        n++;
+    }
+    sqlite3_finalize(st);
+    *out = rows;
+    *count = n;
+    return 0;
 }

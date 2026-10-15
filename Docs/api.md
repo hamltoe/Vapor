@@ -184,6 +184,48 @@ The package filename comes from the stored manifest, never from the URL.
 
 `HEAD` is accepted on the download route so a client can probe size.
 
+### `GET /api/v1/games/{id}/mods`
+
+Latest version of each mod published for that game. 404 if the game
+does not exist. An empty `mods` array is a game with no mods.
+
+```json
+{
+  "mods": [
+    {
+      "id": "brutal-doom",
+      "name": "Brutal Doom",
+      "description": "Gameplay mod.",
+      "latest_version": "21",
+      "size": 12345,
+      "sha256": "…64 hex characters…",
+      "has_cover": false
+    }
+  ]
+}
+```
+
+### `GET /api/v1/games/{id}/mods/{mod_id}/manifest`
+
+The stored schema-1 mod manifest for the latest version. See
+[manifest.md](manifest.md#mods).
+
+### `GET /api/v1/games/{id}/mods/{mod_id}/versions/{version}/manifest`
+
+The same document for one version. `{version}` may be `latest`.
+
+### `GET /api/v1/games/{id}/mods/{mod_id}/versions/{version}/cover`
+
+The mod cover (`image/png` or `image/jpeg`). 404 if that version has
+none. The filename comes from the stored cover name, not the URL.
+
+### `GET /api/v1/download/{id}/mods/{mod_id}/{version}`
+
+The mod package bytes, `application/octet-stream`. `{version}` may be
+`latest`. The package filename comes from the stored mod manifest. A
+zip that still lives in the drop folder is served from there; a zip
+built from loose files is served from the content root.
+
 ### `GET /api/v1/me/saves/{id}`
 
 Metadata for the signed-in user's save archive of that game. 404 when

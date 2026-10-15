@@ -650,3 +650,239 @@ vapor_manifest_pick_target(const vapor_manifest *m, const char *platform,
     }
     return NULL;
 }
+
+void
+vapor_mod_manifest_init(vapor_mod_manifest *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->schema = VAPOR_MOD_SCHEMA;
+}
+
+void
+vapor_mod_manifest_free(vapor_mod_manifest *m)
+{
+    if (!m) {
+        return;
+    }
+    free(m->id);
+    free(m->game_id);
+    free(m->name);
+    free(m->version);
+    free(m->description);
+    free(m->cover);
+    free(m->package.file);
+    free(m->package.format);
+    free(m->package.strip_prefix);
+    free(m->exec);
+    free(m->cwd);
+    free_str_array(m->args, m->nargs);
+    free_str_array(m->exec_bits, m->nexec_bits);
+    memset(m, 0, sizeof(*m));
+}
+
+#define MOD_FAIL(...)                                                         \
+    do {                                                                      \
+        if (err && errsz) {                                                   \
+            snprintf(err, errsz, __VA_ARGS__);                                \
+        }                                                                     \
+        goto fail;                                                            \
+    } while (0)
+
+static int
+mod_rel_field(char **slot, const cJSON *obj, const char *key, char *err,
+              size_t errsz)
+{
+    *slot = json_dup_string(obj, key);
+    if (*slot && !**slot) {
+        free(*slot);
+        *slot = NULL;
+    }
+    slashify(*slot);
+    if (*slot
+        && ((*slot)[0] == '/' || strstr(*slot, "..") || strchr(*slot, ':'))) {
+        if (err && errsz) {
+            snprintf(err, errsz,
+                     "\"%s\" must be a relative path without \"..\"", key);
+        }
+        return -1;
+    }
+    return 0;
+}
+
+int
+vapor_mod_manifest_parse(const char *json, size_t len, vapor_mod_manifest *out,
+                         char *err, size_t errsz)
+{
+    cJSON       *root = NULL;
+    const cJSON *pkg, *schema;
+    size_t       i;
+
+    vapor_mod_manifest_init(out);
+    root = cJSON_ParseWithLength(json, len);
+    if (!root || !cJSON_IsObject(root)) {
+        MOD_FAIL("mod manifest is not a JSON object");
+    }
+
+    schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema)) {
+        MOD_FAIL("mod manifest is missing \"schema\"");
+    }
+    out->schema = schema->valueint;
+    if (out->schema != VAPOR_MOD_SCHEMA) {
+        MOD_FAIL("unsupported mod schema %d (this build understands %d)",
+                 out->schema, VAPOR_MOD_SCHEMA);
+    }
+
+    out->id          = json_dup_string(root, "id");
+    out->game_id     = json_dup_string(root, "game_id");
+    out->name        = json_dup_string(root, "name");
+    out->version     = json_dup_string(root, "version");
+    out->description = json_dup_string(root, "description");
+    out->cover       = json_dup_string(root, "cover");
+
+    if (!out->id || !vapor_id_is_valid(out->id)) {
+        MOD_FAIL("\"id\" must be 1-%d chars of [a-z0-9._-] starting alphanumeric",
+                 VAPOR_ID_MAX);
+    }
+    if (out->game_id && !vapor_id_is_valid(out->game_id)) {
+        MOD_FAIL("\"game_id\" must be a game id");
+    }
+    if (!out->name || !*out->name) {
+        MOD_FAIL("\"name\" is required");
+    }
+    if (!out->version || !vapor_version_is_valid(out->version)) {
+        MOD_FAIL("\"version\" is missing or not a valid version");
+    }
+    if (out->cover
+        && (!*out->cover || strchr(out->cover, '/') || strchr(out->cover, '\\'))) {
+        MOD_FAIL("\"cover\" must be a bare filename");
+    }
+
+    pkg = cJSON_GetObjectItemCaseSensitive(root, "package");
+    if (!cJSON_IsObject(pkg)) {
+        MOD_FAIL("\"package\" object is required");
+    }
+    out->package.file   = json_dup_string(pkg, "file");
+    out->package.format = json_dup_string(pkg, "format");
+    if (!out->package.file || !*out->package.file
+        || strchr(out->package.file, '/') || strchr(out->package.file, '\\')) {
+        MOD_FAIL("\"package.file\" must be a bare filename");
+    }
+    if (!out->package.format) {
+        out->package.format = vapor_strdup("zip");
+        if (!out->package.format) {
+            MOD_FAIL("out of memory");
+        }
+    }
+    if (strcmp(out->package.format, "zip") != 0) {
+        MOD_FAIL("mod package format must be zip");
+    }
+    {
+        const cJSON *sz = cJSON_GetObjectItemCaseSensitive(pkg, "size");
+        const cJSON *sh = cJSON_GetObjectItemCaseSensitive(pkg, "sha256");
+
+        if (!cJSON_IsNumber(sz) || sz->valuedouble < 0) {
+            MOD_FAIL("\"package.size\" must be a non-negative number");
+        }
+        out->package.size = (uint64_t)sz->valuedouble;
+        if (!cJSON_IsString(sh) || !is_hex64(sh->valuestring)) {
+            MOD_FAIL("\"package.sha256\" must be 64 hex characters");
+        }
+        memcpy(out->package.sha256, sh->valuestring, VAPOR_SHA256_HEX_LEN + 1);
+    }
+
+    if (mod_rel_field(&out->exec, root, "exec", err, errsz) != 0
+        || mod_rel_field(&out->cwd, root, "cwd", err, errsz) != 0) {
+        goto fail;
+    }
+    if (json_dup_string_array(root, "args", &out->args, &out->nargs) != 0) {
+        MOD_FAIL("\"args\" must be an array of strings");
+    }
+    if (json_dup_string_array(root, "exec_bits", &out->exec_bits,
+                              &out->nexec_bits)
+        != 0) {
+        MOD_FAIL("\"exec_bits\" must be an array of strings");
+    }
+    for (i = 0; i < out->nexec_bits; i++) {
+        if (!out->exec_bits[i] || strstr(out->exec_bits[i], "..")
+            || out->exec_bits[i][0] == '/' || out->exec_bits[i][0] == '\\') {
+            MOD_FAIL("\"exec_bits\" entry must be a relative path without \"..\"");
+        }
+    }
+
+    cJSON_Delete(root);
+    return 0;
+
+fail:
+    cJSON_Delete(root);
+    vapor_mod_manifest_free(out);
+    return -1;
+}
+
+#undef MOD_FAIL
+
+char *
+vapor_mod_manifest_serialize(const vapor_mod_manifest *m)
+{
+    cJSON *root, *pkg;
+    char  *text = NULL;
+    size_t i;
+
+    root = cJSON_CreateObject();
+    if (!root) {
+        return NULL;
+    }
+    if (!cJSON_AddNumberToObject(root, "schema", m->schema)) { goto done; }
+    if (!cJSON_AddStringToObject(root, "id", m->id ? m->id : "")) { goto done; }
+    if (m->game_id && !cJSON_AddStringToObject(root, "game_id", m->game_id)) {
+        goto done;
+    }
+    if (!cJSON_AddStringToObject(root, "name", m->name ? m->name : "")) { goto done; }
+    if (!cJSON_AddStringToObject(root, "version", m->version ? m->version : "")) {
+        goto done;
+    }
+    if (m->description
+        && !cJSON_AddStringToObject(root, "description", m->description)) {
+        goto done;
+    }
+    if (m->cover && !cJSON_AddStringToObject(root, "cover", m->cover)) { goto done; }
+
+    pkg = cJSON_AddObjectToObject(root, "package");
+    if (!pkg) { goto done; }
+    if (!cJSON_AddStringToObject(pkg, "file", m->package.file ? m->package.file : "")) {
+        goto done;
+    }
+    if (!cJSON_AddStringToObject(pkg, "format",
+                                 m->package.format ? m->package.format : "zip")) {
+        goto done;
+    }
+    if (!cJSON_AddNumberToObject(pkg, "size", (double)m->package.size)) { goto done; }
+    if (!cJSON_AddStringToObject(pkg, "sha256", m->package.sha256)) { goto done; }
+
+    if (m->exec && !cJSON_AddStringToObject(root, "exec", m->exec)) { goto done; }
+    if (m->cwd && !cJSON_AddStringToObject(root, "cwd", m->cwd)) { goto done; }
+    if (m->nargs) {
+        cJSON *a = cJSON_AddArrayToObject(root, "args");
+        if (!a) { goto done; }
+        for (i = 0; i < m->nargs; i++) {
+            cJSON *s = cJSON_CreateString(m->args[i] ? m->args[i] : "");
+            if (!s) { goto done; }
+            cJSON_AddItemToArray(a, s);
+        }
+    }
+    if (m->nexec_bits) {
+        cJSON *a = cJSON_AddArrayToObject(root, "exec_bits");
+        if (!a) { goto done; }
+        for (i = 0; i < m->nexec_bits; i++) {
+            cJSON *s = cJSON_CreateString(m->exec_bits[i] ? m->exec_bits[i] : "");
+            if (!s) { goto done; }
+            cJSON_AddItemToArray(a, s);
+        }
+    }
+
+    text = cJSON_Print(root);
+
+done:
+    cJSON_Delete(root);
+    return text;
+}

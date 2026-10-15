@@ -1033,9 +1033,12 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
     int                 exit_code = -1, rc = -1;
     int                 use_dhewm3 = 0;
     int                 use_dosbox = 0;
+    int                 have_mod_launch = 0;
+    vapor_mod_manifest  mod_launch;
     char                dosbox_exe[VAPOR_PATH_MAX];
     char                conf_path[VAPOR_PATH_MAX];
 
+    vapor_mod_manifest_init(&mod_launch);
     if (vapor_db_get_install(vc, game_id, &rec) != 0) {
         vapor_client_set_error(vc, "%s is not installed; run \"vapor install %s\"",
                                game_id, game_id);
@@ -1139,11 +1142,27 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
         }
     }
 
+    {
+        int over = vapor_mod_launch_override(vc, game_id, &mod_launch);
+
+        if (over < 0) {
+            vapor_manifest_free(&m);
+            return -1;
+        }
+        if (over == 0) {
+            have_mod_launch = 1;
+            if (mod_launch.exec && mod_launch.exec[0]) {
+                snprintf(launch_rel, sizeof(launch_rel), "%s", mod_launch.exec);
+            }
+        }
+    }
+
     if ((size_t)snprintf(exec_path, sizeof(exec_path), "%s/%s", install_dir,
                          launch_rel)
         >= sizeof(exec_path)) {
         vapor_client_set_error(vc, "launch path is too long");
         vapor_manifest_free(&m);
+        vapor_mod_manifest_free(&mod_launch);
         return -1;
     }
     vapor_plat_native_path(exec_path);
@@ -1153,6 +1172,7 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
                                "\"vapor install %s --force\" to repair",
                                launch_rel, game_id);
         vapor_manifest_free(&m);
+        vapor_mod_manifest_free(&mod_launch);
         return -1;
     }
 
@@ -1172,6 +1192,7 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
         } else if (looks_doom3_tree(install_dir, game_id, launch_rel)) {
             if (ensure_dhewm3(vc, &rec, alt, sizeof(alt)) != 0) {
                 vapor_manifest_free(&m);
+                vapor_mod_manifest_free(&mod_launch);
                 return -1;
             }
             snprintf(exec_path, sizeof(exec_path), "%s", alt);
@@ -1184,18 +1205,29 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
                                    "publisher's patch or a source-port exe "
                                    "in the install folder and try Play again");
             vapor_manifest_free(&m);
+            vapor_mod_manifest_free(&mod_launch);
             return -1;
         }
     }
 
     if (use_dhewm3) {
         parent_dir(exec_path, cwd_path, sizeof(cwd_path));
+    } else if (have_mod_launch && mod_launch.cwd && mod_launch.cwd[0]) {
+        if ((size_t)snprintf(cwd_path, sizeof(cwd_path), "%s/%s", install_dir,
+                             mod_launch.cwd)
+            >= sizeof(cwd_path)) {
+            vapor_client_set_error(vc, "working directory path is too long");
+            vapor_manifest_free(&m);
+            vapor_mod_manifest_free(&mod_launch);
+            return -1;
+        }
     } else if (t->cwd && *t->cwd) {
         if ((size_t)snprintf(cwd_path, sizeof(cwd_path), "%s/%s", install_dir,
                              t->cwd)
             >= sizeof(cwd_path)) {
             vapor_client_set_error(vc, "working directory path is too long");
             vapor_manifest_free(&m);
+            vapor_mod_manifest_free(&mod_launch);
             return -1;
         }
     } else {
@@ -1205,6 +1237,7 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
 
     if (!use_dosbox && !use_dhewm3 && refuse_missing_dlls(vc, exec_path) != 0) {
         vapor_manifest_free(&m);
+        vapor_mod_manifest_free(&mod_launch);
         return -1;
     }
 
@@ -1212,8 +1245,11 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
         if (resolve_dosbox(vc, dosbox_exe, sizeof(dosbox_exe)) != 0) {
             goto cleanup;
         }
-        if (write_dosbox_conf(vc, install_dir, launch_rel, t->cwd, conf_path,
-                              sizeof(conf_path))
+        if (write_dosbox_conf(vc, install_dir, launch_rel,
+                              (have_mod_launch && mod_launch.cwd && mod_launch.cwd[0])
+                                  ? mod_launch.cwd
+                                  : t->cwd,
+                              conf_path, sizeof(conf_path))
             != 0) {
             goto cleanup;
         }
@@ -1222,11 +1258,16 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
         goto cleanup;
     }
 
-    argv_n = use_dosbox ? 4 : (use_dhewm3 ? 3 : t->nargs);
+    argv_n = use_dosbox ? 4 : (use_dhewm3 ? 3
+             : (have_mod_launch && ((mod_launch.exec && mod_launch.exec[0])
+                                    || mod_launch.nargs > 0)
+                    ? mod_launch.nargs
+                    : t->nargs));
     argv = (char **)calloc(argv_n + 2, sizeof(*argv));
     if (!argv) {
         vapor_client_set_error(vc, "out of memory");
         vapor_manifest_free(&m);
+        vapor_mod_manifest_free(&mod_launch);
         return -1;
     }
     argv[0] = vapor_strdup(use_dosbox ? dosbox_exe : exec_path);
@@ -1251,8 +1292,16 @@ vapor_launch_game(vapor_client *vc, const char *game_id, int *out_exit)
             goto cleanup;
         }
     } else {
-        for (i = 0; i < t->nargs; i++) {
-            argv[i + 1] = expand_install_dir(t->args[i], install_dir);
+        char **use_args = t->args;
+        size_t use_n = t->nargs;
+
+        if (have_mod_launch
+            && ((mod_launch.exec && mod_launch.exec[0]) || mod_launch.nargs > 0)) {
+            use_args = mod_launch.args;
+            use_n = mod_launch.nargs;
+        }
+        for (i = 0; i < use_n; i++) {
+            argv[i + 1] = expand_install_dir(use_args[i], install_dir);
             if (!argv[i + 1]) {
                 vapor_client_set_error(vc, "out of memory");
                 goto cleanup;
@@ -1340,5 +1389,6 @@ cleanup:
         free(env);
     }
     vapor_manifest_free(&m);
+    vapor_mod_manifest_free(&mod_launch);
     return rc;
 }

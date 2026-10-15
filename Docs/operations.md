@@ -166,21 +166,30 @@ Point `library_root` at a directory of games (config `library_root`, or
     cover.png             # optional
   Some RPG/
     disc.iso              # unpacked into content_root as package.zip;
-                          # .iso, .img, and BIN/CUE .bin in the folder are merged;
-                          # originals left in place
+                          # .iso, .img, BIN/CUE .bin, and Alcohol .mdf
+                          # in the folder are merged; originals left in place
+                          # (.mds next to an .mdf is a sidecar, not a package)
   Portable Game/
     Game.exe              # unpacked tree; zipped into content_root
     data/
   Override Me/
     vapor.json            # optional id/name/version/exec/cover
     setup.zip
+  Doom/
+    doom.zip
+    mods/                 # ignored while packaging the game
+      Brutal Doom/
+        vapor.json        # id, name, version, optional exec/args
+        brutalv21.pk3
 ```
 
 The folder name becomes the catalog title; a slug of that name is the
 id (`Hollow Knight` → `hollow-knight`). Discovery prefers a zip, then
-an unpacked executable tree, then an ISO. Every `.iso`, `.img`, and
-BIN/CUE `.bin` in the folder is unpacked (ISO 9660 / Joliet, including
+an unpacked executable tree, then an ISO. Every `.iso`, `.img`,
+BIN/CUE `.bin`, and Alcohol `.mdf` in the folder is unpacked (ISO 9660 / Joliet, including
 raw 2352-byte sectors) into one tree, so a three-disc set is merged.
+A sibling `.mds` gives an `.mdf` its data-track offset and sector size;
+the sidecar itself is not packaged.
 If the disc ships a Wise installer, that is unpacked too and those files
 are zipped; the original disc images are left in the drop folder. After unpack, `autorun.exe` / `autorun.inf` are
 dropped. A tiny root `*.DAT` is removed only when a larger file of the
@@ -313,6 +322,43 @@ The library grid fetches `/games/{id}/versions/{version}/cover` into
 `covers/` under the client data directory and decodes it on the UI
 thread. Click a tile to open the details page (description, ratings,
 Install / Verify / Remove). A game without art still shows a text card.
+
+## Mods
+
+A publisher exe whose name contains `patch` is copied into the game
+package during discovery. That file is part of the install and cannot
+be turned off. Community mods are a different drop: a folder under
+`<game>/mods/<name>/` with a `vapor.json` and either loose files or a
+zip. See [manifest.md](manifest.md#mods).
+
+Discovery publishes each mod folder without changing the game
+fingerprint. The library details page lists name, version, and a short
+description. Install downloads the zip, enables the mod, and rebuilds
+the game files from the original tree plus every enabled mod. Remove
+disables it and deletes the download. Enable and Disable change the
+set. Restore original turns every mod off and puts the install files
+back. A game that is not installed yet still lists its mods, with
+Install disabled until setup is complete. The status line says
+`original` or how many mods are applied.
+
+The same commands on the CLI:
+
+```
+vapor mods GAME
+vapor mod install GAME MOD
+vapor mod remove GAME MOD
+vapor mod enable GAME MOD
+vapor mod disable GAME MOD
+vapor restore GAME
+```
+
+Play keeps the game's own target unless an enabled mod sets `exec` or
+`args`. The last enabled mod that sets either one wins.
+
+A game Update or reinstall clears those enabled flags after the new
+tree is in place and leaves the downloaded zips, so the details page
+can offer them again. Uninstall of the game deletes the local mod rows
+and those downloads.
 
 ## Updates
 

@@ -10,23 +10,36 @@
 #include "gui.h"
 #include "vapor/util.h"
 
-#define ROW_H   28.0f
-/* Cover, title, rating, state, optional Play. Install/verify live on the
- * details page so the grid stays a browse view. */
-#define COVER_H 150.0f
-#define CARD_H  248.0f
-/* The narrowest a card may get before the grid drops to fewer columns. Cards
- * then stretch to share the row, so this is a minimum and not a fixed size. */
-#define CARD_W  260.0f
-#define PAD_X   18.0f
-#define PAD_Y   16.0f
-#define GAP     10.0f
+#define ROW_H         28.0f
+#define TILE_TITLE_H  20.0f
+#define TILE_LINE_H   18.0f
+#define TILE_BTN_H    26.0f
+/* Tighter than the page padding, and only applied while a tile is drawn. */
+#define TILE_PAD_X    8.0f
+#define TILE_PAD_Y    6.0f
+#define TILE_ROW_GAP  4.0f
+#define GROUP_PAD_X   12.0f
+#define GROUP_PAD_Y   10.0f
+/* Steam library capsules are 600x900. The cover slot uses that ratio so the
+ * usual art fills the tile; other ratios are fitted inside it. */
+#define COVER_ASPECT  1.5f
+/* Fixed tile width. Growing a tile to fill the row also grew its 2:3 cover,
+ * so a 1080p window (and a half-screen snap of one) held a single row of
+ * about three games. This width keeps two full rows — at least nine games —
+ * in that snap, and more across the whole monitor. */
+#define CARD_W        156.0f
+#define PAD_X         18.0f
+#define PAD_Y         16.0f
+#define GAP           10.0f
 
-#define COL_TEXT_V    nk_rgb(222, 227, 234)
-#define COL_MUTED_V   nk_rgb(141, 152, 168)
-#define COL_GOOD_V    nk_rgb(104, 190, 124)
-#define COL_WARN_V    nk_rgb(226, 170, 80)
-#define COL_BAD_V     nk_rgb(222, 106, 106)
+#define COL_TEXT_V       nk_rgb(222, 227, 234)
+#define COL_MUTED_V      nk_rgb(141, 152, 168)
+#define COL_GOOD_V       nk_rgb(104, 190, 124)
+#define COL_WARN_V       nk_rgb(226, 170, 80)
+#define COL_BAD_V        nk_rgb(222, 106, 106)
+#define COL_CARD_V       nk_rgb(41, 47, 57)
+#define COL_CARD_HOVER_V nk_rgb(54, 63, 78)
+#define COL_ACCENT_V     nk_rgb(86, 172, 232)
 
 void
 vapor_gui_style(struct nk_context *ctx)
@@ -34,9 +47,9 @@ vapor_gui_style(struct nk_context *ctx)
     struct nk_color t[NK_COLOR_COUNT];
     struct nk_color bg = nk_rgb(22, 26, 32);
     struct nk_color panel = nk_rgb(32, 37, 45);
-    struct nk_color card = nk_rgb(41, 47, 57);
+    struct nk_color card = COL_CARD_V;
     struct nk_color accent = nk_rgb(66, 150, 210);
-    struct nk_color accent_h = nk_rgb(86, 172, 232);
+    struct nk_color accent_h = COL_ACCENT_V;
     struct nk_color field = nk_rgb(26, 30, 37);
 
     /* Every slot is set explicitly rather than patching the defaults, so a
@@ -77,7 +90,7 @@ vapor_gui_style(struct nk_context *ctx)
 
     ctx->style.window.padding = nk_vec2(PAD_X, PAD_Y);
     ctx->style.window.spacing = nk_vec2(GAP, GAP);
-    ctx->style.window.group_padding = nk_vec2(12, 10);
+    ctx->style.window.group_padding = nk_vec2(GROUP_PAD_X, GROUP_PAD_Y);
     ctx->style.window.border = 0.0f;
     ctx->style.button.rounding = 3.0f;
     ctx->style.window.fixed_background = nk_style_item_color(bg);
@@ -555,6 +568,73 @@ open_details(vapor_app *app, const char *id)
     snprintf(app->selected_id, sizeof(app->selected_id), "%s", id);
 }
 
+/* Inner width of a tile, after the tile's own horizontal padding. */
+static float
+tile_cover_height(float card_w)
+{
+    float inner = card_w - 2.0f * TILE_PAD_X;
+
+    if (inner < 1.0f) {
+        inner = 1.0f;
+    }
+    return inner * COVER_ASPECT;
+}
+
+/* Tall enough for the cover plus the title, meta, state, and Play rows.
+ * Nuklear offsets the first row by group padding and keeps spacing under
+ * every row, so the card has to budget both or the button is clipped. */
+static float
+tile_card_height(float cover_h)
+{
+    return TILE_PAD_Y
+        + cover_h + TILE_ROW_GAP
+        + TILE_TITLE_H + TILE_ROW_GAP
+        + TILE_LINE_H + TILE_ROW_GAP
+        + TILE_LINE_H + TILE_ROW_GAP
+        + TILE_BTN_H + TILE_ROW_GAP
+        + TILE_PAD_Y;
+}
+
+/* nk_image stretches the texture to the widget. Fit the bitmap instead so a
+ * 600x900 capsule is not pulled into a wide banner. */
+static void
+draw_cover_fit(struct nk_context *ctx, struct nk_image img, int iw, int ih)
+{
+    struct nk_rect slot, dest;
+    float          scale, dw, dh;
+
+    if (!nk_widget(&slot, ctx) || !ctx->current) {
+        return;
+    }
+    if (iw <= 0 || ih <= 0 || slot.w <= 1.0f || slot.h <= 1.0f) {
+        nk_draw_image(&ctx->current->buffer, slot, &img, nk_rgb(255, 255, 255));
+        return;
+    }
+
+    scale = slot.w / (float)iw;
+    if ((float)ih * scale > slot.h) {
+        scale = slot.h / (float)ih;
+    }
+    dw = (float)iw * scale;
+    dh = (float)ih * scale;
+    dest.x = slot.x + (slot.w - dw) * 0.5f;
+    dest.y = slot.y + (slot.h - dh) * 0.5f;
+    dest.w = dw;
+    dest.h = dh;
+    nk_draw_image(&ctx->current->buffer, dest, &img, nk_rgb(255, 255, 255));
+}
+
+static void
+cover_pixels(const vapor_app *app, size_t index, int *w, int *h)
+{
+    *w = 0;
+    *h = 0;
+    if (app->covers && index < app->ngames) {
+        *w = app->covers[index].w;
+        *h = app->covers[index].h;
+    }
+}
+
 static void
 rating_text(const vapor_catalog_entry *e, char *out, size_t outsz)
 {
@@ -573,7 +653,8 @@ rating_text(const vapor_catalog_entry *e, char *out, size_t outsz)
 }
 
 static void
-draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
+draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy,
+          float cover_h)
 {
     const vapor_catalog_entry *e = &app->games[index];
     char            size[32], line[320], rate[160];
@@ -582,39 +663,52 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
     struct nk_image cover;
     struct nk_rect  card_bounds;
     int             open;
+    int             hovered;
     int             played = 0;
-
-    /* A group paints style.window.fixed_background like any other panel, so
-     * pushing a different one for the duration is what gives cards a surface
-     * distinct from the page behind them. */
-    nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
-                             nk_style_item_color(nk_rgb(41, 47, 57)));
-    nk_style_push_float(ctx, &ctx->style.window.rounding, 4.0f);
+    int             cw = 0, ch = 0;
 
     /* Peek the layout slot in the parent grid *before* the group eats it.
      * nk_window_get_bounds after group_begin is the outer panel, so every
      * tile would treat a click as its own and the last game would win. */
     card_bounds = nk_widget_bounds(ctx);
+    hovered = nk_input_is_mouse_hovering_rect(&ctx->input, card_bounds);
+
+    /* A group paints style.window.fixed_background like any other panel, so
+     * pushing a different one for the duration is what gives cards a surface
+     * distinct from the page behind them. */
+    nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
+                             nk_style_item_color(hovered ? COL_CARD_HOVER_V
+                                                         : COL_CARD_V));
+    nk_style_push_float(ctx, &ctx->style.window.rounding, 4.0f);
+    nk_style_push_vec2(ctx, &ctx->style.window.group_padding,
+                       nk_vec2(TILE_PAD_X, TILE_PAD_Y));
+    /* Horizontal gap stays the page gap so the column the parent already
+     * measured does not shift. Only the rows inside the tile tighten. */
+    nk_style_push_vec2(ctx, &ctx->style.window.spacing,
+                       nk_vec2(GAP, TILE_ROW_GAP));
 
     open = nk_group_begin(ctx, e->id, NK_WINDOW_NO_SCROLLBAR);
     if (!open) {
+        nk_style_pop_vec2(ctx);
+        nk_style_pop_vec2(ctx);
         nk_style_pop_float(ctx);
         nk_style_pop_style_item(ctx);
         return;
     }
 
-    nk_layout_row_dynamic(ctx, COVER_H, 1);
+    nk_layout_row_dynamic(ctx, cover_h, 1);
     if (vapor_gui_cover_image(app, index, &cover)) {
-        nk_image(ctx, cover);
+        cover_pixels(app, index, &cw, &ch);
+        draw_cover_fit(ctx, cover, cw, ch);
     } else {
         nk_label_colored(ctx, e->name, NK_TEXT_CENTERED, COL_MUTED_V);
     }
 
-    nk_layout_row_dynamic(ctx, 22, 1);
+    nk_layout_row_dynamic(ctx, TILE_TITLE_H, 1);
     nk_label_colored(ctx, e->name, NK_TEXT_LEFT, COL_TEXT_V);
 
     rating_text(e, rate, sizeof(rate));
-    nk_layout_row_dynamic(ctx, 16, 1);
+    nk_layout_row_dynamic(ctx, TILE_LINE_H, 1);
     if (e->external) {
         nk_label_colored(ctx, "local shortcut", NK_TEXT_LEFT, COL_MUTED_V);
     } else if (rate[0]) {
@@ -626,7 +720,7 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
         nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_MUTED_V);
     }
 
-    nk_layout_row_dynamic(ctx, 16, 1);
+    nk_layout_row_dynamic(ctx, TILE_LINE_H, 1);
     if (e->external) {
         if (e->play_seconds > 0) {
             char played_for[64];
@@ -661,10 +755,7 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
     }
     nk_label_colored(ctx, state, NK_TEXT_LEFT, state_col);
 
-    nk_layout_row_dynamic(ctx, 8, 1);
-    nk_spacing(ctx, 1);
-
-    nk_layout_row_dynamic(ctx, ROW_H, 1);
+    nk_layout_row_dynamic(ctx, TILE_BTN_H, 1);
     if (!busy && e->installed && !e->setup_pending) {
         if (nk_button_label(ctx, "Play")) {
             played = 1;
@@ -680,8 +771,15 @@ draw_card(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
     }
 
     nk_group_end(ctx);
+    nk_style_pop_vec2(ctx);
+    nk_style_pop_vec2(ctx);
     nk_style_pop_float(ctx);
     nk_style_pop_style_item(ctx);
+
+    if (hovered && ctx->current) {
+        nk_stroke_rect(&ctx->current->buffer, card_bounds, 4.0f, 2.0f,
+                       COL_ACCENT_V);
+    }
 
     /* The whole tile opens details. Play is the exception so a launch does
      * not also navigate away. */
@@ -717,6 +815,132 @@ desc_height(struct nk_context *ctx, const char *text)
 }
 
 static void
+mod_blurb(const char *text, char *out, size_t outsz)
+{
+    size_t i, n;
+
+    if (!text || !text[0] || outsz == 0) {
+        if (out && outsz > 0) {
+            out[0] = '\0';
+        }
+        return;
+    }
+    n = strlen(text);
+    if (n >= outsz) {
+        n = outsz - 1;
+    }
+    for (i = 0; i < n; i++) {
+        if (text[i] == '\n' || text[i] == '\r') {
+            break;
+        }
+        out[i] = text[i];
+    }
+    if (i >= 96 && i + 3 < outsz) {
+        out[93] = '.';
+        out[94] = '.';
+        out[95] = '.';
+        out[96] = '\0';
+        return;
+    }
+    out[i] = '\0';
+}
+
+static void
+draw_mods(struct nk_context *ctx, vapor_app *app, const vapor_catalog_entry *e,
+          int busy)
+{
+    size_t i;
+    int    applied = 0;
+    int    ready = e->installed && !e->setup_pending;
+    char   line[384];
+
+    if (!busy && !app->mods_loading && strcmp(app->mods_for, e->id) != 0) {
+        vapor_gui_start_mods(app, e->id);
+    }
+
+    nk_layout_row_dynamic(ctx, 10, 1);
+    nk_spacing(ctx, 1);
+    nk_layout_row_dynamic(ctx, 18, 1);
+    nk_label_colored(ctx, "Mods", NK_TEXT_LEFT, COL_MUTED_V);
+
+    if (app->mods_loading || strcmp(app->mods_for, e->id) != 0) {
+        nk_layout_row_dynamic(ctx, 18, 1);
+        nk_label_colored(ctx, "Loading mods...", NK_TEXT_LEFT, COL_MUTED_V);
+        return;
+    }
+
+    for (i = 0; i < app->nmods; i++) {
+        if (app->mods[i].enabled) {
+            applied++;
+        }
+    }
+    nk_layout_row_dynamic(ctx, 18, 1);
+    if (applied == 0) {
+        nk_label_colored(ctx, "original", NK_TEXT_LEFT, COL_GOOD_V);
+    } else if (applied == 1) {
+        nk_label_colored(ctx, "1 mod applied", NK_TEXT_LEFT, COL_WARN_V);
+    } else {
+        snprintf(line, sizeof(line), "%d mods applied", applied);
+        nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_WARN_V);
+    }
+
+    if (app->nmods == 0) {
+        nk_layout_row_dynamic(ctx, 36, 1);
+        nk_label_wrap(ctx, "No mods in the library for this game.");
+        return;
+    }
+
+    for (i = 0; i < app->nmods; i++) {
+        const vapor_mod_entry *m = &app->mods[i];
+        char                    blurb[128];
+
+        snprintf(line, sizeof(line), "%s   %s",
+                 m->name[0] ? m->name : m->id,
+                 m->latest_version[0] ? m->latest_version : "-");
+        nk_layout_row_dynamic(ctx, 20, 1);
+        nk_label_colored(ctx, line, NK_TEXT_LEFT, COL_TEXT_V);
+        mod_blurb(m->description, blurb, sizeof(blurb));
+        if (blurb[0]) {
+            nk_layout_row_dynamic(ctx, 18, 1);
+            nk_label_colored(ctx, blurb, NK_TEXT_LEFT, COL_MUTED_V);
+        }
+
+        if (busy) {
+            continue;
+        }
+        if (!m->downloaded) {
+            nk_layout_row_dynamic(ctx, ROW_H, 1);
+            if (!ready) {
+                nk_label_colored(ctx, "Install", NK_TEXT_CENTERED, COL_MUTED_V);
+            } else if (nk_button_label(ctx, "Install")) {
+                vapor_gui_start_mod_install(app, e->id, m->id);
+            }
+        } else {
+            nk_layout_row_dynamic(ctx, ROW_H, 2);
+            if (!ready) {
+                nk_label_colored(ctx, "Remove", NK_TEXT_CENTERED, COL_MUTED_V);
+                nk_label_colored(ctx, m->enabled ? "Disable" : "Enable",
+                                 NK_TEXT_CENTERED, COL_MUTED_V);
+            } else {
+                if (nk_button_label(ctx, "Remove")) {
+                    vapor_gui_start_mod_remove(app, e->id, m->id);
+                }
+                if (nk_button_label(ctx, m->enabled ? "Disable" : "Enable")) {
+                    vapor_gui_start_mod_enable(app, e->id, m->id, !m->enabled);
+                }
+            }
+        }
+    }
+
+    if (!busy && ready && applied > 0) {
+        nk_layout_row_dynamic(ctx, ROW_H, 1);
+        if (nk_button_label(ctx, "Restore original")) {
+            vapor_gui_start_mod_restore(app, e->id);
+        }
+    }
+}
+
+static void
 draw_detail(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
 {
     const vapor_catalog_entry *e = &app->games[index];
@@ -730,11 +954,14 @@ draw_detail(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
     nk_layout_row_template_end(ctx);
 
     nk_style_push_style_item(ctx, &ctx->style.window.fixed_background,
-                             nk_style_item_color(nk_rgb(41, 47, 57)));
+                             nk_style_item_color(COL_CARD_V));
     if (nk_group_begin(ctx, "detail-art", NK_WINDOW_NO_SCROLLBAR)) {
+        int cw = 0, ch = 0;
+
         nk_layout_row_dynamic(ctx, 260, 1);
         if (vapor_gui_cover_image(app, index, &cover)) {
-            nk_image(ctx, cover);
+            cover_pixels(app, index, &cw, &ch);
+            draw_cover_fit(ctx, cover, cw, ch);
         } else {
             nk_label_colored(ctx, "no cover", NK_TEXT_CENTERED, COL_MUTED_V);
         }
@@ -863,6 +1090,10 @@ draw_detail(struct nk_context *ctx, vapor_app *app, size_t index, int busy)
                       "it can match the title.");
     }
 
+    if (!e->external) {
+        draw_mods(ctx, app, e, busy);
+    }
+
     if (busy) {
         nk_layout_row_dynamic(ctx, ROW_H, 1);
         nk_spacing(ctx, 1);
@@ -947,10 +1178,18 @@ vapor_gui_library_screen(struct nk_context *ctx, vapor_app *app, int w, int h)
             /* Measured from the panel rather than the window, so the padding and
              * the scrollbar are already accounted for. */
             float avail = nk_window_get_content_region_size(ctx).x;
+            int   item_w = (int)CARD_W;
+            float cover_h = tile_cover_height(CARD_W);
 
-            per_row = (int)(avail / CARD_W);
+            /* Fixed width, not stretched. A wider tile would force a taller
+             * 2:3 cover and drop back to one row. */
+            per_row = (int)((avail + GAP) / (CARD_W + GAP));
             if (per_row < 1) {
                 per_row = 1;
+            }
+            while (per_row > 1
+                   && CARD_W * (float)per_row + GAP * (float)(per_row - 1) > avail) {
+                per_row--;
             }
 
             for (i = 0; i < app->ngames; i++) {
@@ -958,13 +1197,10 @@ vapor_gui_library_screen(struct nk_context *ctx, vapor_app *app, int w, int h)
                     continue;
                 }
                 if (shown % per_row == 0) {
-                    /* Cards share the row evenly instead of leaving a ragged gap
-                     * on the right. */
-                    int item_w =
-                        (int)((avail - GAP * (float)(per_row - 1)) / (float)per_row);
-                    nk_layout_row_static(ctx, CARD_H, item_w, per_row);
+                    nk_layout_row_static(ctx, tile_card_height(cover_h), item_w,
+                                         per_row);
                 }
-                draw_card(ctx, app, i, busy);
+                draw_card(ctx, app, i, busy, cover_h);
                 shown++;
             }
 

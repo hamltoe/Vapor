@@ -13,7 +13,7 @@ The player client is `vapor-gui`; the `vapor` CLI is for scripts.
   │                     │           games, versions │
   │                     ├── library_root            │
   │                     │     <Game Title>/         │
-  │                     │       *.zip | *.iso       │
+  │                     │   *.zip | *.iso | *.mdf   │
   │                     │       or unpacked files   │
   │                     └── content_root            │
   │                           <id>/<version>/       │
@@ -106,9 +106,15 @@ Inside that directory:
 
 ```
 config.ini          server URL, session token, library path, optional TLS pin, optional dosbox_path
-library.db          installed games, local shortcuts, and playtime (not accounts)
+library.db          installed games, local shortcuts, playtime, and mod_state
 covers/<id>-<ver>.cover
 ```
+
+`mod_state` rows are `(game_id, mod_id, version, name, enabled, sort_order)`.
+Downloaded mod zips live under `<library>/.vapor/mods/<game_id>/`,
+outside the install tree, so a game update does not delete them. Inside
+an install, `.vapor/vanilla/` and `.vapor/mod-applied.json` are the
+restore log. They are not part of the published package.
 
 Games themselves live in `library_dir`, defaulting to a sibling `games`
 folder. `vapor config library PATH` points it at a larger drive.
@@ -133,8 +139,9 @@ subdirectory is one game. Discovery runs at startup and then every
 folders are fingerprint-skipped so large archives are not re-hashed.
 
 Zip files already sitting in `library_root` are served in place.
-ISO and BIN/CUE files are unpacked (ISO 9660 / Joliet, including raw
+ISO, BIN/CUE, and Alcohol `.mdf` files are unpacked (ISO 9660 / Joliet, including raw
 2352-byte sectors); every image in the folder is merged into one tree.
+A sibling `.mds` names the `.mdf` data track and is left out of the zip.
 A Wise `SETUP.EXE` on the disc is unpacked too, and the files are zipped
 into `<content_root>/<game_id>/<version>/package.zip`; the original disc
 images are left in the drop folder. Folders of loose files are zipped into the
@@ -151,6 +158,13 @@ spawn a SafeDisc/SECDRV wrapper; it looks for a patched or source-port
 exe instead. Every path segment is validated
 so a hostile id or version cannot walk out of the root.
 
+A top-level `mods/` directory inside a game folder is not part of the
+game fingerprint or the game zip. Each subdirectory is a mod package.
+The server SQLite tables `mods` and `discovered_mods` store the package
+file, size, sha256, manifest JSON, optional cover, and the drop-folder
+path. They are created with `CREATE TABLE IF NOT EXISTS` on an existing
+database, and they disappear with the game row.
+
 Accounts live only in the server SQLite `users` table (username, Argon2id
 hash, admin flag, created_at). The client never creates a local user; it
 stores a session token after a successful login against vapord.
@@ -163,7 +177,9 @@ so a catalog read does not block a login write.
 The GUI runs at most one background job. While the job is active the UI
 thread must not call `libvapor`. Refresh builds a pending catalog and the
 UI thread swaps it in after the worker is joined, so the draw loop never
-sees the array being replaced underneath it. Install progress is an
+sees the array being replaced underneath it. A mods list for the open
+details page is fetched the same way: the worker fills a pending array
+and the UI thread swaps it in after the join. Install progress is an
 overall 0–100% of download, hash, extract, disc unpack, and Windows
 setup; the bar is not download-only.
 

@@ -142,14 +142,18 @@ job_main(void *ud)
     vapor_job_kind kind;
     char           game_id[VAPOR_ID_MAX + 1];
     char           version[VAPOR_VERSION_MAX + 1];
+    char           mod_id[VAPOR_ID_MAX + 1];
     int            rating_score = 0;
+    int            mod_enable = 0;
 
     /* Copied out once so the rest of the function needs no lock for them. */
     SDL_LockMutex(app->job.lock);
     kind = app->job.kind;
     snprintf(game_id, sizeof(game_id), "%s", app->job.game_id);
     snprintf(version, sizeof(version), "%s", app->job.version);
+    snprintf(mod_id, sizeof(mod_id), "%s", app->job.mod_id);
     rating_score = app->job.rating_score;
+    mod_enable = app->job.mod_enable;
     SDL_UnlockMutex(app->job.lock);
 
     switch (kind) {
@@ -423,6 +427,60 @@ job_main(void *ud)
         break;
     }
 
+    case JOB_MODS: {
+        vapor_mod_entry *rows = NULL;
+        size_t           n = 0;
+
+        set_status(app, "loading mods...");
+        if (vapor_mods_fetch(vc, game_id, &rows, &n) != 0) {
+            finish(app, 1, "%s", vc->err);
+            break;
+        }
+        free(app->pending_mods);
+        app->pending_mods = rows;
+        app->pending_nmods = n;
+        snprintf(app->pending_mods_for, sizeof(app->pending_mods_for), "%s",
+                 game_id);
+        finish(app, 0, "");
+        break;
+    }
+
+    case JOB_MOD_INSTALL:
+        set_status(app, "installing %s...", mod_id);
+        if (vapor_mod_install(vc, game_id, mod_id) != 0) {
+            finish(app, 1, "%s", vc->err[0] ? vc->err : "could not install the mod");
+            break;
+        }
+        finish(app, 0, "installed %s", mod_id);
+        break;
+
+    case JOB_MOD_REMOVE:
+        set_status(app, "removing %s...", mod_id);
+        if (vapor_mod_remove(vc, game_id, mod_id) != 0) {
+            finish(app, 1, "%s", vc->err[0] ? vc->err : "could not remove the mod");
+            break;
+        }
+        finish(app, 0, "removed %s", mod_id);
+        break;
+
+    case JOB_MOD_ENABLE:
+        set_status(app, "%s %s...", mod_enable ? "enabling" : "disabling", mod_id);
+        if (vapor_mod_set_enabled(vc, game_id, mod_id, mod_enable) != 0) {
+            finish(app, 1, "%s", vc->err[0] ? vc->err : "could not update the mod");
+            break;
+        }
+        finish(app, 0, "%s %s", mod_enable ? "enabled" : "disabled", mod_id);
+        break;
+
+    case JOB_MOD_RESTORE:
+        set_status(app, "restoring original files...");
+        if (vapor_mod_restore(vc, game_id) != 0) {
+            finish(app, 1, "%s", vc->err[0] ? vc->err : "could not restore the game");
+            break;
+        }
+        finish(app, 0, "restored original files");
+        break;
+
     case JOB_NONE:
     default:
         finish(app, 1, "nothing to do");
@@ -436,7 +494,7 @@ job_main(void *ud)
  * single-owner rule on vapor_client true. */
 static int
 start(vapor_app *app, vapor_job_kind kind, const char *game_id,
-      const char *version, int rating_score)
+      const char *version, int rating_score, const char *mod_id, int mod_enable)
 {
     if (vapor_gui_job_busy(app) || app->job.done) {
         return -1;
@@ -460,6 +518,9 @@ start(vapor_app *app, vapor_job_kind kind, const char *game_id,
              game_id ? game_id : "");
     snprintf(app->job.version, sizeof(app->job.version), "%s",
              version ? version : "");
+    snprintf(app->job.mod_id, sizeof(app->job.mod_id), "%s",
+             mod_id ? mod_id : "");
+    app->job.mod_enable = mod_enable;
     app->job.rating_score = rating_score;
     app->job.rating_avg = 0;
     app->job.rating_votes = 0;
@@ -494,49 +555,88 @@ vapor_gui_start_login(vapor_app *app, int registering)
     app->server_url_len = (int)strlen(app->server_url);
     (void)vapor_client_save_config(app->vc);
 
-    return start(app, registering ? JOB_REGISTER : JOB_LOGIN, NULL, NULL, 0);
+    return start(app, registering ? JOB_REGISTER : JOB_LOGIN, NULL, NULL, 0,
+                 NULL, 0);
 }
 
 int
 vapor_gui_start_refresh(vapor_app *app)
 {
-    return start(app, JOB_REFRESH, NULL, NULL, 0);
+    return start(app, JOB_REFRESH, NULL, NULL, 0, NULL, 0);
 }
 
 int
 vapor_gui_start_install(vapor_app *app, const char *game_id, const char *version)
 {
-    return start(app, JOB_INSTALL, game_id, version, 0);
+    return start(app, JOB_INSTALL, game_id, version, 0, NULL, 0);
 }
 
 int
 vapor_gui_start_uninstall(vapor_app *app, const char *game_id)
 {
-    return start(app, JOB_UNINSTALL, game_id, NULL, 0);
+    return start(app, JOB_UNINSTALL, game_id, NULL, 0, NULL, 0);
 }
 
 int
 vapor_gui_start_verify(vapor_app *app, const char *game_id)
 {
-    return start(app, JOB_VERIFY, game_id, NULL, 0);
+    return start(app, JOB_VERIFY, game_id, NULL, 0, NULL, 0);
 }
 
 int
 vapor_gui_start_setup(vapor_app *app, const char *game_id)
 {
-    return start(app, JOB_SETUP, game_id, NULL, 0);
+    return start(app, JOB_SETUP, game_id, NULL, 0, NULL, 0);
 }
 
 int
 vapor_gui_start_launch(vapor_app *app, const char *game_id)
 {
-    return start(app, JOB_LAUNCH, game_id, NULL, 0);
+    return start(app, JOB_LAUNCH, game_id, NULL, 0, NULL, 0);
 }
 
 int
 vapor_gui_start_rate(vapor_app *app, const char *game_id, int score)
 {
-    return start(app, JOB_RATE, game_id, NULL, score);
+    return start(app, JOB_RATE, game_id, NULL, score, NULL, 0);
+}
+
+int
+vapor_gui_start_mods(vapor_app *app, const char *game_id)
+{
+    int rc = start(app, JOB_MODS, game_id, NULL, 0, NULL, 0);
+
+    if (rc == 0) {
+        app->mods_loading = 1;
+    }
+    return rc;
+}
+
+int
+vapor_gui_start_mod_install(vapor_app *app, const char *game_id,
+                            const char *mod_id)
+{
+    return start(app, JOB_MOD_INSTALL, game_id, NULL, 0, mod_id, 0);
+}
+
+int
+vapor_gui_start_mod_remove(vapor_app *app, const char *game_id,
+                           const char *mod_id)
+{
+    return start(app, JOB_MOD_REMOVE, game_id, NULL, 0, mod_id, 0);
+}
+
+int
+vapor_gui_start_mod_enable(vapor_app *app, const char *game_id,
+                           const char *mod_id, int enabled)
+{
+    return start(app, JOB_MOD_ENABLE, game_id, NULL, 0, mod_id, enabled ? 1 : 0);
+}
+
+int
+vapor_gui_start_mod_restore(vapor_app *app, const char *game_id)
+{
+    return start(app, JOB_MOD_RESTORE, game_id, NULL, 0, NULL, 0);
 }
 
 void
@@ -580,6 +680,30 @@ vapor_gui_job_poll(vapor_app *app)
         if (kind == JOB_INSTALL || kind == JOB_UNINSTALL || kind == JOB_SETUP) {
             vapor_gui_start_refresh(app);
         }
+        if (kind == JOB_MODS) {
+            app->mods_loading = 0;
+            free(app->mods);
+            app->mods = NULL;
+            app->nmods = 0;
+            if (!failed) {
+                app->mods = app->pending_mods;
+                app->nmods = app->pending_nmods;
+                app->pending_mods = NULL;
+                app->pending_nmods = 0;
+            } else {
+                free(app->pending_mods);
+                app->pending_mods = NULL;
+                app->pending_nmods = 0;
+            }
+            snprintf(app->mods_for, sizeof(app->mods_for), "%s", gid);
+            app->pending_mods_for[0] = '\0';
+        }
+        if (kind == JOB_MOD_INSTALL || kind == JOB_MOD_REMOVE
+            || kind == JOB_MOD_ENABLE || kind == JOB_MOD_RESTORE) {
+            if (app->selected_id[0]) {
+                vapor_gui_start_mods(app, app->selected_id);
+            }
+        }
         if (failed) {
             return;
         }
@@ -612,6 +736,20 @@ vapor_gui_job_poll(vapor_app *app)
             snprintf(app->selected_id, sizeof(app->selected_id), "%s",
                      app->pending_select);
             app->pending_select[0] = '\0';
+        }
+        if (app->selected_id[0]) {
+            size_t i;
+            int    external = 0;
+
+            for (i = 0; i < app->ngames; i++) {
+                if (strcmp(app->games[i].id, app->selected_id) == 0) {
+                    external = app->games[i].external;
+                    break;
+                }
+            }
+            if (!external) {
+                vapor_gui_start_mods(app, app->selected_id);
+            }
         }
         break;
     case JOB_INSTALL:

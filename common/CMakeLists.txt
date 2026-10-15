@@ -3,6 +3,7 @@ add_library(vapor_common STATIC
     src/sha256.c
     src/util.c
     src/manifest.c
+    src/mods.c
     src/iso9660.c
     src/wise.c
     src/saves.c

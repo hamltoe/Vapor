@@ -12,6 +12,7 @@ set(VAPOR_CORE_SOURCES
     src/installer.c
     src/launch.c
     src/local.c
+    src/mods.c
     src/savesync.c
 )
 

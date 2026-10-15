@@ -8,6 +8,99 @@
 
 #include "vapor/util.h"
 
+/* `rest` is "<mod_id>/<version>". */
+static int
+download_mod(vapord *app, struct mg_connection *c, int64_t user_id,
+             const char *game_id, const char *rest)
+{
+    char   mod_id[VAPOR_ID_MAX + 1];
+    char   version[VAPOR_VERSION_MAX + 1];
+    char   path[VAPORD_PATH_MAX];
+    char  *manifest_json = NULL;
+    vapor_mod_manifest m;
+    char   err[256];
+    size_t n;
+    const char *slash;
+
+    if (!vapor_id_is_valid(game_id)) {
+        return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST, "bad game id");
+    }
+    slash = strchr(rest, '/');
+    if (!slash || slash == rest) {
+        return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST,
+                                  "expected /download/<game>/mods/<mod>/<version>");
+    }
+    n = (size_t)(slash - rest);
+    if (n == 0 || n > VAPOR_ID_MAX) {
+        return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST, "bad mod id");
+    }
+    memcpy(mod_id, rest, n);
+    mod_id[n] = '\0';
+    if (!vapor_id_is_valid(mod_id)) {
+        return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST, "bad mod id");
+    }
+    rest = slash + 1;
+    n = strlen(rest);
+    if (n == 0 || n > VAPOR_VERSION_MAX || strchr(rest, '/')) {
+        return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST, "bad version");
+    }
+    memcpy(version, rest, n + 1);
+    if (strcmp(version, "latest") == 0) {
+        if (vapord_mod_latest_version(app->db, game_id, mod_id, version,
+                                      sizeof(version))
+            != 0) {
+            return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND,
+                                      "no published version for mod \"%s\"",
+                                      mod_id);
+        }
+    } else if (!vapor_version_is_valid(version)) {
+        return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST, "bad version");
+    }
+
+    if (vapord_mod_manifest(app->db, game_id, mod_id, version, &manifest_json) != 0
+        || !manifest_json) {
+        return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND, "no such mod");
+    }
+    if (vapor_mod_manifest_parse(manifest_json, strlen(manifest_json), &m, err,
+                                 sizeof(err))
+        != 0) {
+        free(manifest_json);
+        VLOG_ERROR("stored mod manifest for %s/%s is invalid: %s", game_id,
+                   mod_id, err);
+        return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL,
+                                  "stored manifest is invalid");
+    }
+    free(manifest_json);
+
+    {
+        char source[VAPORD_PATH_MAX];
+        int  have_source = vapord_mod_source(app->db, game_id, mod_id, version,
+                                            source, sizeof(source));
+
+        if (have_source == 0) {
+            vapor_mod_manifest_free(&m);
+            if (vapord_library_resolve(&app->cfg, source, path, sizeof(path))
+                != 0) {
+                return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL,
+                                          "could not resolve library file");
+            }
+        } else if (vapord_mod_content_path(&app->cfg, game_id, mod_id, version,
+                                           m.package.file, path, sizeof(path))
+                   != 0) {
+            vapor_mod_manifest_free(&m);
+            return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL,
+                                      "could not resolve package path");
+        } else {
+            vapor_mod_manifest_free(&m);
+        }
+    }
+
+    VLOG_INFO("user %lld downloading mod %s/%s/%s", (long long)user_id, game_id,
+              mod_id, version);
+    mg_send_mime_file2(c, path, "application/octet-stream", NULL);
+    return 200;
+}
+
 /* GET /download/<game_id>/<version>
  *
  * The auth check happens here and then mg_send_file takes over, which is what
@@ -46,6 +139,9 @@ vapord_route_download(vapord *app, struct mg_connection *c, const char *method,
     memcpy(game_id, p, n);
     game_id[n] = '\0';
     p += n;
+    if (vapor_str_has_prefix(p, "/mods/")) {
+        return download_mod(app, c, user_id, game_id, p + strlen("/mods/"));
+    }
     if (*p != '/') {
         return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST,
                                   "expected /download/<game>/<version>");

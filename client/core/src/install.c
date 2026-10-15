@@ -1123,7 +1123,8 @@ looks_disc_image(const char *name, const char *abs)
         return 0;
     }
     if (vapor_str_ends_with_ci(name, ".iso")
-        || vapor_str_ends_with_ci(name, ".img")) {
+        || vapor_str_ends_with_ci(name, ".img")
+        || vapor_str_ends_with_ci(name, ".mdf")) {
         return 1;
     }
     if (!vapor_str_ends_with_ci(name, ".bin")) {
@@ -2426,6 +2427,11 @@ verified:
         vapor_manifest_free(&m);
         return -1;
     }
+    /* The tree was replaced, so any mods that were applied are gone. */
+    if (vapor_mods_clear_enabled(vc, rec.game_id) != 0) {
+        vapor_manifest_free(&m);
+        return -1;
+    }
 
     if (!opts->keep_download) {
         remove(zip_path);
@@ -2827,6 +2833,10 @@ setup_game_impl(vapor_client *vc, const char *game_id, const setup_hooks *hooks)
         vapor_plat_dir_size(play_dir, &rec.size_on_disk);
         rec.installed_at = vapor_now_unix();
         if (persist_install(vc, &rec) != 0) {
+            vapor_manifest_free(&m);
+            return -1;
+        }
+        if (vapor_mods_clear_enabled(vc, rec.game_id) != 0) {
             vapor_manifest_free(&m);
             return -1;
         }
@@ -3262,7 +3272,8 @@ uninstall_game_impl(vapor_client *vc, const char *game_id, vapor_progress_fn cb,
     /* A shortcut only remembers a path. Forgetting it must not walk that
      * directory, run an uninstaller, or delete anything. */
     if (vapor_install_is_external(&rec)) {
-        if (vapor_db_forget_install(vc, game_id) != 0) {
+        if (vapor_db_forget_install(vc, game_id) != 0
+            || vapor_mods_forget_game(vc, game_id) != 0) {
             vapor_client_set_error(vc, "could not update the local database");
             return -1;
         }
@@ -3465,7 +3476,8 @@ uninstall_game_impl(vapor_client *vc, const char *game_id, vapor_progress_fn cb,
         return -1;
     }
 
-    if (vapor_db_forget_install(vc, game_id) != 0) {
+    if (vapor_db_forget_install(vc, game_id) != 0
+        || vapor_mods_forget_game(vc, game_id) != 0) {
         vapor_client_set_error(vc, "removed the files but could not update the "
                                   "local database");
         return -1;

@@ -48,7 +48,12 @@ typedef enum {
     JOB_VERIFY,
     JOB_LAUNCH,
     JOB_SETUP,
-    JOB_RATE
+    JOB_RATE,
+    JOB_MODS,
+    JOB_MOD_INSTALL,
+    JOB_MOD_REMOVE,
+    JOB_MOD_ENABLE,
+    JOB_MOD_RESTORE
 } vapor_job_kind;
 
 typedef struct {
@@ -62,6 +67,8 @@ typedef struct {
 
     char     game_id[VAPOR_ID_MAX + 1];
     char     version[VAPOR_VERSION_MAX + 1];
+    char     mod_id[VAPOR_ID_MAX + 1];
+    int      mod_enable;
     char     status[256];       /* what the job is doing, shown in the UI */
     char     message[512];      /* the outcome, shown when it finishes */
     uint64_t done_bytes;        /* overall work done (bytes for downloads, ticks for install) */
@@ -127,6 +134,16 @@ typedef struct {
     char  pending_select[VAPOR_ID_MAX + 1];
     char  selected_id[VAPOR_ID_MAX + 1]; /* details page; empty means the grid */
     int   quit;
+
+    /* Mods for the open details page. The worker fills pending_*; the UI
+     * thread swaps them in after the job is joined. */
+    vapor_mod_entry *mods;
+    size_t           nmods;
+    char             mods_for[VAPOR_ID_MAX + 1];
+    int              mods_loading;
+    vapor_mod_entry *pending_mods;
+    size_t           pending_nmods;
+    char             pending_mods_for[VAPOR_ID_MAX + 1];
 } vapor_app;
 
 /* ------------------------------------------------------------------- worker */
@@ -151,6 +168,14 @@ int  vapor_gui_start_verify(vapor_app *app, const char *game_id);
 int  vapor_gui_start_setup(vapor_app *app, const char *game_id);
 int  vapor_gui_start_launch(vapor_app *app, const char *game_id);
 int  vapor_gui_start_rate(vapor_app *app, const char *game_id, int score);
+int  vapor_gui_start_mods(vapor_app *app, const char *game_id);
+int  vapor_gui_start_mod_install(vapor_app *app, const char *game_id,
+                                 const char *mod_id);
+int  vapor_gui_start_mod_remove(vapor_app *app, const char *game_id,
+                                const char *mod_id);
+int  vapor_gui_start_mod_enable(vapor_app *app, const char *game_id,
+                                const char *mod_id, int enabled);
+int  vapor_gui_start_mod_restore(vapor_app *app, const char *game_id);
 
 void vapor_gui_notice(vapor_app *app, int is_error, const char *fmt, ...);
 

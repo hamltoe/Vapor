@@ -256,6 +256,8 @@ main(int argc, char **argv)
     vapor_gui_job_shutdown(&app);
     vapor_gui_covers_release(&app);
     free(app.games);
+    free(app.mods);
+    free(app.pending_mods);
     free(app.pending_games);
     free(app.pending_covers);
     vapor_secure_zero(app.password, sizeof(app.password));

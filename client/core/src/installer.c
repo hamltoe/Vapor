@@ -185,6 +185,7 @@ vapor_inst_detect(const char *exec, const char *cwd)
     base = basename_of(exec);
     if (vapor_str_ends_with_ci(base, ".iso")
         || vapor_str_ends_with_ci(base, ".img")
+        || vapor_str_ends_with_ci(base, ".mdf")
         || (vapor_str_ends_with_ci(base, ".bin") && vapor_iso_is_image(exec))) {
         return VAPOR_INST_ISO;
     }

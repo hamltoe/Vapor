@@ -69,6 +69,146 @@ send_cover(vapord *app, struct mg_connection *c, const char *game_id,
     return 200;
 }
 
+/* `p` is "/mods" or "/mods/<id>/..." */
+static int
+route_mods(vapord *app, struct mg_connection *c, const char *method,
+           const char *game_id, const char *p)
+{
+    char   mod_id[VAPOR_ID_MAX + 1];
+    char   version[VAPOR_VERSION_MAX + 1];
+    size_t n;
+    int    exists = 0;
+
+    if (strcmp(method, "GET") != 0) {
+        return vapord_send_errorf(c, 405, VAPOR_ERR_BAD_REQUEST, "use GET");
+    }
+    if (vapord_game_lookup(app->db, game_id, &exists) != 0) {
+        return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND,
+                                  "no such game \"%s\"", game_id);
+    }
+
+    if (strcmp(p, "/mods") == 0 || strcmp(p, "/mods/") == 0) {
+        cJSON *out = vapord_mods_json(app->db, game_id);
+
+        if (!out) {
+            return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL,
+                                      "could not list mods");
+        }
+        return vapord_send_json(c, 200, out);
+    }
+
+    if (!vapor_str_has_prefix(p, "/mods/")) {
+        return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND, "no such endpoint");
+    }
+    p += strlen("/mods/");
+    n = strcspn(p, "/");
+    if (n == 0 || n > VAPOR_ID_MAX) {
+        return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST, "bad mod id");
+    }
+    memcpy(mod_id, p, n);
+    mod_id[n] = '\0';
+    if (!vapor_id_is_valid(mod_id)) {
+        return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST, "bad mod id");
+    }
+    p += n;
+
+    /* GET /games/<id>/mods/<mod>/manifest  (latest) */
+    if (strcmp(p, "/manifest") == 0 || strcmp(p, "/manifest/") == 0) {
+        char *json = NULL;
+        char  len[32];
+
+        if (vapord_mod_manifest(app->db, game_id, mod_id, "latest", &json) != 0
+            || !json) {
+            return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND,
+                                      "no manifest for mod \"%s\"", mod_id);
+        }
+        snprintf(len, sizeof(len), "%llu", (unsigned long long)strlen(json));
+        mg_response_header_start(c, 200);
+        mg_response_header_add(c, "Content-Type",
+                               "application/json; charset=utf-8", -1);
+        mg_response_header_add(c, "Content-Length", len, -1);
+        mg_response_header_send(c);
+        mg_write(c, json, strlen(json));
+        free(json);
+        return 200;
+    }
+
+    if (!vapor_str_has_prefix(p, "/versions/")) {
+        return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND, "no such endpoint");
+    }
+    p += strlen("/versions/");
+    n = strcspn(p, "/");
+    if (n == 0 || n > VAPOR_VERSION_MAX) {
+        return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST, "bad version");
+    }
+    memcpy(version, p, n);
+    version[n] = '\0';
+    p += n;
+    if (strcmp(version, "latest") == 0) {
+        if (vapord_mod_latest_version(app->db, game_id, mod_id, version,
+                                      sizeof(version))
+            != 0) {
+            return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND,
+                                      "no published version for mod \"%s\"",
+                                      mod_id);
+        }
+    } else if (!vapor_version_is_valid(version)) {
+        return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST, "bad version");
+    }
+
+    if (strcmp(p, "/manifest") == 0 || strcmp(p, "/manifest/") == 0) {
+        char *json = NULL;
+        char  len[32];
+
+        if (vapord_mod_manifest(app->db, game_id, mod_id, version, &json) != 0
+            || !json) {
+            return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND,
+                                      "no manifest for mod \"%s\" version %s",
+                                      mod_id, version);
+        }
+        snprintf(len, sizeof(len), "%llu", (unsigned long long)strlen(json));
+        mg_response_header_start(c, 200);
+        mg_response_header_add(c, "Content-Type",
+                               "application/json; charset=utf-8", -1);
+        mg_response_header_add(c, "Content-Length", len, -1);
+        mg_response_header_send(c);
+        mg_write(c, json, strlen(json));
+        free(json);
+        return 200;
+    }
+
+    if (strcmp(p, "/cover") == 0 || strcmp(p, "/cover/") == 0) {
+        char cover[256];
+        char path[VAPORD_PATH_MAX];
+        const char *mime;
+
+        if (vapord_mod_cover(app->db, game_id, mod_id, version, cover,
+                             sizeof(cover))
+            != 0) {
+            return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND,
+                                      "%s has no cover art", mod_id);
+        }
+        if (vapord_mod_content_path(&app->cfg, game_id, mod_id, version, cover,
+                                    path, sizeof(path))
+            != 0) {
+            return vapord_send_errorf(c, 500, VAPOR_ERR_INTERNAL,
+                                      "could not resolve cover path");
+        }
+        if (vapor_str_ends_with_ci(cover, ".png")) {
+            mime = "image/png";
+        } else if (vapor_str_ends_with_ci(cover, ".jpg")
+                   || vapor_str_ends_with_ci(cover, ".jpeg")) {
+            mime = "image/jpeg";
+        } else {
+            mime = "application/octet-stream";
+        }
+        mg_send_mime_file2(c, path, mime, NULL);
+        return 200;
+    }
+
+    return vapord_send_errorf(c, 404, VAPOR_ERR_NOT_FOUND, "no such endpoint");
+}
+
 /* tail is everything after VAPOR_API_PREFIX, i.e. "/games..." */
 int
 vapord_route_catalog(vapord *app, struct mg_connection *c, const char *method,
@@ -119,6 +259,10 @@ vapord_route_catalog(vapord *app, struct mg_connection *c, const char *method,
         return vapord_send_errorf(c, 400, VAPOR_ERR_BAD_REQUEST, "bad game id");
     }
     p += n;
+
+    if (vapor_str_has_prefix(p, "/mods")) {
+        return route_mods(app, c, method, game_id, p);
+    }
 
     /* GET /games/<id> -> detail */
     if (*p == '\0' || strcmp(p, "/") == 0) {

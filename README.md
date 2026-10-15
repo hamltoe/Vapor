@@ -175,7 +175,8 @@ For a systemd install, TLS with Caddy, and a dedicated `vapor` user, see
 ## Publish a game
 
 Drop a folder into `library_root`. Each game is one unique directory.
-Inside it, vapord accepts a zip (usual case), one or more ISOs, or an
+Inside it, vapord accepts a zip (usual case), one or more disc images
+(`.iso`, `.bin`, or Alcohol `.mdf` with a sibling `.mds`), or an
 unpacked tree with an executable. Disc images in the same folder are
 merged, unpacked, and zipped for download; a Wise SETUP.EXE on the disc
 is unpacked too. Windows installer kits (`setup.exe`, `.msi`) are run on
@@ -184,7 +185,7 @@ the player PC after download. The original images stay in the folder:
 ```
 run/library/
   My Game/
-    MyGame.zip          # or Game.iso / Game.bin, or Game.exe plus data/
+    MyGame.zip          # or Game.iso / Game.bin / Game.mdf, or Game.exe plus data/
     cover.png           # optional
 ```
 

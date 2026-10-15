@@ -9,14 +9,16 @@
  *       vapor.json           (optional overrides)
  *     Disc Game/
  *       Disc 1.iso          (all images unpacked into one tree, then zipped;
- *       Disc 2.bin           .iso, .img, and BIN/CUE .bin; originals stay)
+ *       Disc 2.mdf           .iso, .img, BIN/CUE .bin, and Alcohol .mdf;
+ *                            originals stay; a sibling .mds is not a package)
  *     Portable Game/
  *       Game.exe
  *       data/
  *
- * Zip files already sitting in library_root are served in place. ISO and
- * BIN/CUE images (.iso, .img, .bin) are unpacked (ISO 9660 / Joliet); every
- * image in the folder is merged.
+ * Zip files already sitting in library_root are served in place. ISO,
+ * BIN/CUE, and Alcohol images (.iso, .img, .bin, .mdf) are unpacked
+ * (ISO 9660 / Joliet); every image in the folder is merged. An .mdf uses
+ * a sibling .mds for its data-track offset when one is present.
  * A Wise SETUP.EXE on the disc is unpacked too, and the files are zipped into
  * <content_root>/<id>/<version>/package.zip; the original disc images are left
  * in the drop folder. A folder of loose files is zipped the same way.
@@ -391,6 +393,14 @@ skip_walk_dir(const char *name)
         || vapor_str_eq_ci(name, "node_modules");
 }
 
+/* Community mods live in a top-level mods/ directory. They are published on
+ * their own and must not change the game package or its fingerprint. */
+static int
+skip_game_mods(const char *rel, const char *name)
+{
+    return (!rel || !rel[0]) && name && vapor_str_eq_ci(name, "mods");
+}
+
 static int
 is_disc_installer_name(const char *base)
 {
@@ -634,16 +644,19 @@ is_iso_name(const char *name)
 {
     return vapor_str_ends_with_ci(name, ".iso")
         || vapor_str_ends_with_ci(name, ".img")
-        || vapor_str_ends_with_ci(name, ".bin");
+        || vapor_str_ends_with_ci(name, ".bin")
+        || vapor_str_ends_with_ci(name, ".mdf");
 }
 
 /* .bin is also a Linux binary suffix. Only a file with an ISO 9660
- * filesystem (plain or raw BIN/CUE sectors) is a disc image. */
+ * filesystem (plain or raw BIN/CUE sectors) is a disc image. .mdf is
+ * Alcohol's disc image; the .mds sidecar is not. */
 static int
 is_disc_image_file(const char *abs, const char *name)
 {
     if (vapor_str_ends_with_ci(name, ".iso")
-        || vapor_str_ends_with_ci(name, ".img")) {
+        || vapor_str_ends_with_ci(name, ".img")
+        || vapor_str_ends_with_ci(name, ".mdf")) {
         return 1;
     }
     return vapor_str_ends_with_ci(name, ".bin") && abs
@@ -723,6 +736,9 @@ fingerprint_tree(const char *root, const char *rel, uint8_t acc[VAPOR_SHA256_DIG
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
             continue;
         }
+        if (skip_game_mods(rel, ent->d_name)) {
+            continue;
+        }
         if (rel[0]) {
             if (join2(child_rel, sizeof(child_rel), rel, ent->d_name) != 0) {
                 rc = -1;
@@ -798,6 +814,9 @@ fingerprint_patches(const char *root, const char *rel, vapor_sha256 *ctx,
 
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0
             || ent->d_name[0] == '.') {
+            continue;
+        }
+        if (skip_game_mods(rel, ent->d_name)) {
             continue;
         }
         if (rel[0]) {
@@ -902,6 +921,9 @@ zip_add_dir(packer *p, const char *src_root, const char *rel)
         if (ent->d_name[0] == '.') {
             continue;
         }
+        if (skip_game_mods(rel, ent->d_name)) {
+            continue;
+        }
         if (rel[0]) {
             if (join2(child_rel, sizeof(child_rel), rel, ent->d_name) != 0) {
                 rc = -1;
@@ -978,6 +1000,9 @@ copy_publisher_patches(const char *src_root, const char *rel,
 
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0
             || ent->d_name[0] == '.') {
+            continue;
+        }
+        if (skip_game_mods(rel, ent->d_name)) {
             continue;
         }
         if (rel[0]) {
@@ -1288,6 +1313,9 @@ inspect_tree(const char *root, const char *rel, const char *slug,
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
             continue;
         }
+        if (skip_game_mods(rel, ent->d_name)) {
+            continue;
+        }
         if (rel[0]) {
             if (join2(child_rel, sizeof(child_rel), rel, ent->d_name) != 0) {
                 rc = -1;
@@ -1392,6 +1420,9 @@ find_largest(const char *root, const char *rel, int (*match)(const char *),
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
             continue;
         }
+        if (skip_game_mods(rel, ent->d_name)) {
+            continue;
+        }
         if (rel[0]) {
             if (join2(child_rel, sizeof(child_rel), rel, ent->d_name) != 0) {
                 continue;
@@ -1461,6 +1492,9 @@ collect_matching(const char *root, const char *rel, int (*match)(const char *),
             continue;
         }
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        if (skip_game_mods(rel, ent->d_name)) {
             continue;
         }
         if (rel[0]) {
@@ -2252,13 +2286,641 @@ done:
     return rc;
 }
 
+/* --------------------------------------------------------------- mod publish */
+
+typedef struct {
+    char   id[VAPOR_ID_MAX + 1];
+    char   name[256];
+    char   version[VAPOR_VERSION_MAX + 1];
+    char   description[VAPOR_DESC_MAX];
+    char   exec_path[VAPORD_PATH_MAX];
+    char   cwd[VAPORD_PATH_MAX];
+    char   cover[256];
+    char   package[256];
+    char **args;
+    size_t nargs;
+    char **exec_bits;
+    size_t nexec_bits;
+} mod_side;
+
+static void
+mod_side_clear(mod_side *s)
+{
+    size_t i;
+
+    for (i = 0; i < s->nargs; i++) {
+        free(s->args[i]);
+    }
+    free(s->args);
+    for (i = 0; i < s->nexec_bits; i++) {
+        free(s->exec_bits[i]);
+    }
+    free(s->exec_bits);
+    memset(s, 0, sizeof(*s));
+}
+
+static int
+mod_take_strings(const cJSON *obj, const char *key, char ***out, size_t *outn)
+{
+    const cJSON *arr = cJSON_GetObjectItemCaseSensitive(obj, key);
+    const cJSON *it;
+    size_t       n = 0, i = 0;
+    char       **v;
+
+    *out = NULL;
+    *outn = 0;
+    if (!arr || cJSON_IsNull(arr)) {
+        return 0;
+    }
+    if (!cJSON_IsArray(arr)) {
+        return -1;
+    }
+    cJSON_ArrayForEach(it, arr) {
+        if (cJSON_IsString(it)) {
+            n++;
+        }
+    }
+    if (n == 0) {
+        return 0;
+    }
+    v = (char **)calloc(n, sizeof(*v));
+    if (!v) {
+        return -1;
+    }
+    cJSON_ArrayForEach(it, arr) {
+        if (!cJSON_IsString(it) || !it->valuestring) {
+            continue;
+        }
+        v[i] = vapor_strdup(it->valuestring);
+        if (!v[i]) {
+            size_t k;
+            for (k = 0; k < i; k++) {
+                free(v[k]);
+            }
+            free(v);
+            return -1;
+        }
+        i++;
+    }
+    *out = v;
+    *outn = i;
+    return 0;
+}
+
+/* 0 when the sidecar is absent or valid. -1 when vapor.json is unusable. */
+static int
+load_mod_side(const char *dir, mod_side *out)
+{
+    char   path[VAPORD_PATH_MAX];
+    char  *text = NULL;
+    size_t len = 0;
+    cJSON *root;
+    const cJSON *s;
+
+    memset(out, 0, sizeof(*out));
+    if (join2(path, sizeof(path), dir, "vapor.json") != 0) {
+        return -1;
+    }
+    text = vapor_read_file(path, &len);
+    if (!text) {
+        return 0;
+    }
+    root = cJSON_ParseWithLength(text, len);
+    free(text);
+    if (!root || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return -1;
+    }
+    s = cJSON_GetObjectItemCaseSensitive(root, "id");
+    if (cJSON_IsString(s) && s->valuestring) {
+        snprintf(out->id, sizeof(out->id), "%s", s->valuestring);
+    }
+    s = cJSON_GetObjectItemCaseSensitive(root, "name");
+    if (cJSON_IsString(s) && s->valuestring) {
+        snprintf(out->name, sizeof(out->name), "%s", s->valuestring);
+    }
+    s = cJSON_GetObjectItemCaseSensitive(root, "version");
+    if (cJSON_IsString(s) && s->valuestring) {
+        snprintf(out->version, sizeof(out->version), "%s", s->valuestring);
+    }
+    s = cJSON_GetObjectItemCaseSensitive(root, "description");
+    if (cJSON_IsString(s) && s->valuestring) {
+        snprintf(out->description, sizeof(out->description), "%s", s->valuestring);
+    }
+    s = cJSON_GetObjectItemCaseSensitive(root, "exec");
+    if (cJSON_IsString(s) && s->valuestring) {
+        snprintf(out->exec_path, sizeof(out->exec_path), "%s", s->valuestring);
+    }
+    s = cJSON_GetObjectItemCaseSensitive(root, "cwd");
+    if (cJSON_IsString(s) && s->valuestring) {
+        snprintf(out->cwd, sizeof(out->cwd), "%s", s->valuestring);
+    }
+    s = cJSON_GetObjectItemCaseSensitive(root, "cover");
+    if (cJSON_IsString(s) && s->valuestring) {
+        snprintf(out->cover, sizeof(out->cover), "%s", s->valuestring);
+    }
+    s = cJSON_GetObjectItemCaseSensitive(root, "package");
+    if (cJSON_IsString(s) && s->valuestring) {
+        snprintf(out->package, sizeof(out->package), "%s", s->valuestring);
+    }
+    if (mod_take_strings(root, "args", &out->args, &out->nargs) != 0
+        || mod_take_strings(root, "exec_bits", &out->exec_bits, &out->nexec_bits)
+               != 0) {
+        cJSON_Delete(root);
+        mod_side_clear(out);
+        return -1;
+    }
+    cJSON_Delete(root);
+    return 0;
+}
+
+static int
+copy_mod_payload(const char *src_root, const char *rel, const char *dest_root,
+                 const char *skip_name)
+{
+    char           abs[VAPORD_PATH_MAX];
+    DIR           *d;
+    struct dirent *ent;
+    int            rc = 0;
+
+    if (rel[0]) {
+        if (join2(abs, sizeof(abs), src_root, rel) != 0) {
+            return -1;
+        }
+    } else {
+        snprintf(abs, sizeof(abs), "%s", src_root);
+    }
+    d = opendir(abs);
+    if (!d) {
+        return -1;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        char        child_rel[VAPORD_PATH_MAX];
+        char        child_abs[VAPORD_PATH_MAX];
+        char        dest[VAPORD_PATH_MAX];
+        struct stat st;
+
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0
+            || ent->d_name[0] == '.') {
+            continue;
+        }
+        if (!rel[0]
+            && (strcmp(ent->d_name, "vapor.json") == 0
+                || (skip_name && skip_name[0]
+                    && vapor_str_eq_ci(ent->d_name, skip_name)))) {
+            continue;
+        }
+        if (rel[0]) {
+            if (join2(child_rel, sizeof(child_rel), rel, ent->d_name) != 0) {
+                rc = -1;
+                break;
+            }
+        } else {
+            snprintf(child_rel, sizeof(child_rel), "%s", ent->d_name);
+        }
+        if (join2(child_abs, sizeof(child_abs), src_root, child_rel) != 0
+            || join2(dest, sizeof(dest), dest_root, child_rel) != 0) {
+            rc = -1;
+            break;
+        }
+        if (lstat(child_abs, &st) != 0 || S_ISLNK(st.st_mode)) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            if (vapord_content_mkdirs(dest) != 0
+                || copy_mod_payload(src_root, child_rel, dest_root, skip_name)
+                       != 0) {
+                rc = -1;
+                break;
+            }
+            continue;
+        }
+        if (!S_ISREG(st.st_mode)) {
+            continue;
+        }
+        if (copy_file(child_abs, dest) != 0) {
+            rc = -1;
+            break;
+        }
+    }
+    closedir(d);
+    return rc;
+}
+
+static int
+find_top_zip(const char *dir, char *name, size_t namesz, uint64_t *best_size)
+{
+    DIR           *d;
+    struct dirent *ent;
+
+    name[0] = '\0';
+    *best_size = 0;
+    d = opendir(dir);
+    if (!d) {
+        return -1;
+    }
+    while ((ent = readdir(d)) != NULL) {
+        char        path[VAPORD_PATH_MAX];
+        struct stat st;
+
+        if (ent->d_name[0] == '.' || !is_zip_name(ent->d_name)) {
+            continue;
+        }
+        if (join2(path, sizeof(path), dir, ent->d_name) != 0
+            || stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+            continue;
+        }
+        if ((uint64_t)st.st_size >= *best_size) {
+            *best_size = (uint64_t)st.st_size;
+            snprintf(name, namesz, "%s", ent->d_name);
+        }
+    }
+    closedir(d);
+    return name[0] ? 0 : 1;
+}
+
+static int
+mod_cover_file(const char *dir, const mod_side *side, char *out, size_t outsz)
+{
+    struct stat st;
+    const char *cands[4];
+    size_t      i, n = 0;
+
+    out[0] = '\0';
+    if (side->cover[0]) {
+        cands[n++] = side->cover;
+    }
+    cands[n++] = "cover.png";
+    cands[n++] = "cover.jpg";
+    cands[n++] = "cover.jpeg";
+    for (i = 0; i < n; i++) {
+        char path[VAPORD_PATH_MAX];
+
+        if (strchr(cands[i], '/') || strchr(cands[i], '\\')) {
+            continue;
+        }
+        if (join2(path, sizeof(path), dir, cands[i]) != 0) {
+            continue;
+        }
+        if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+            snprintf(out, outsz, "%s", cands[i]);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int
+mod_package_ready(vapord *app, const char *game_id, const char *mod_id,
+                  const char *version)
+{
+    char                source[VAPORD_PATH_MAX];
+    char                path[VAPORD_PATH_MAX];
+    char               *json = NULL;
+    vapor_mod_manifest  m;
+    struct stat         st;
+    int                 src;
+    int                 ok = 0;
+
+    if (vapord_mod_manifest(app->db, game_id, mod_id, version, &json) != 0
+        || !json) {
+        return 0;
+    }
+    if (vapor_mod_manifest_parse(json, strlen(json), &m, NULL, 0) != 0) {
+        free(json);
+        return 0;
+    }
+    free(json);
+    src = vapord_mod_source(app->db, game_id, mod_id, version, source,
+                            sizeof(source));
+    if (src == 0) {
+        ok = vapord_library_resolve(&app->cfg, source, path, sizeof(path)) == 0
+             && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+    } else if (src == 1) {
+        ok = vapord_mod_content_path(&app->cfg, game_id, mod_id, version,
+                                     m.package.file, path, sizeof(path))
+                 == 0
+             && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+    }
+    vapor_mod_manifest_free(&m);
+    return ok;
+}
+
+static int
+publish_mod_folder(vapord *app, const char *game_folder, const char *game_id,
+                   const char *mod_folder, const char *mod_abs, strlist *used_ids)
+{
+    mod_side                side;
+    vapord_discovered_mod   prev;
+    vapor_mod_manifest      mm;
+    char                    id[VAPOR_ID_MAX + 1];
+    char                    name[256];
+    char                    version[VAPOR_VERSION_MAX + 1];
+    char                    fingerprint[VAPOR_SHA256_HEX_LEN + 1];
+    uint8_t                 acc[VAPOR_SHA256_DIGEST_LEN];
+    char                    zip_name[256] = "";
+    char                    zip_abs[VAPORD_PATH_MAX];
+    char                    source_rel[VAPORD_PATH_MAX] = "";
+    char                    version_dir[VAPORD_PATH_MAX];
+    char                    pkg_path[VAPORD_PATH_MAX];
+    char                    pkg_file[256];
+    char                    cover_name[256] = "";
+    char                    stage[VAPORD_PATH_MAX];
+    char                   *json = NULL;
+    char                    sha[VAPOR_SHA256_HEX_LEN + 1];
+    char                    err[256];
+    uint64_t                size = 0;
+    struct stat             st;
+    int                     in_place = 0;
+    int                     rc = 0;
+
+    memset(&side, 0, sizeof(side));
+    vapor_mod_manifest_init(&mm);
+    if (load_mod_side(mod_abs, &side) != 0) {
+        VLOG_WARN("discover: vapor.json in \"%s/mods/%s\" is invalid",
+                  game_folder, mod_folder);
+        return 0;
+    }
+    if (side.id[0]) {
+        if (!vapor_id_is_valid(side.id)) {
+            VLOG_WARN("discover: mod \"%s\" has an invalid id", mod_folder);
+            mod_side_clear(&side);
+            return 0;
+        }
+        snprintf(id, sizeof(id), "%s", side.id);
+    } else if (vapor_id_slug(mod_folder, id, sizeof(id)) != 0) {
+        VLOG_WARN("discover: cannot derive a mod id from \"%s\"", mod_folder);
+        mod_side_clear(&side);
+        return 0;
+    }
+    if (strlist_contains(used_ids, id)) {
+        VLOG_WARN("discover: mod id \"%s\" is already used under \"%s\"", id,
+                  game_folder);
+        mod_side_clear(&side);
+        return 0;
+    }
+    if (strlist_push(used_ids, id) != 0) {
+        mod_side_clear(&side);
+        return -1;
+    }
+    snprintf(name, sizeof(name), "%s", side.name[0] ? side.name : mod_folder);
+
+    memset(acc, 0, sizeof(acc));
+    if (fingerprint_tree(mod_abs, "", acc) != 0) {
+        VLOG_WARN("discover: cannot fingerprint mod \"%s\"", mod_folder);
+        mod_side_clear(&side);
+        return 0;
+    }
+    vapor_sha256_hex(acc, fingerprint);
+    if (side.version[0]) {
+        if (!vapor_version_is_valid(side.version)) {
+            VLOG_WARN("discover: mod \"%s\" has an invalid version", mod_folder);
+            mod_side_clear(&side);
+            return 0;
+        }
+        snprintf(version, sizeof(version), "%s", side.version);
+    } else if (stat(mod_abs, &st) == 0) {
+        snprintf(version, sizeof(version), "%lld", (long long)st.st_mtime);
+    } else {
+        snprintf(version, sizeof(version), "1");
+    }
+    if (!vapor_version_is_valid(version)) {
+        snprintf(version, sizeof(version), "1");
+    }
+
+    if (vapord_discovered_mod_get(app->db, game_id, mod_folder, &prev) == 0
+        && strcmp(prev.mod_id, id) != 0) {
+        vapord_mod_delete(app->db, game_id, prev.mod_id);
+    }
+    if (vapord_discovered_mod_get(app->db, game_id, mod_folder, &prev) == 0
+        && strcmp(prev.fingerprint, fingerprint) == 0
+        && strcmp(prev.version, version) == 0
+        && strcmp(prev.mod_id, id) == 0
+        && mod_package_ready(app, game_id, id, version)) {
+        mod_side_clear(&side);
+        return 0;
+    }
+
+    if (side.package[0]) {
+        if (join2(zip_abs, sizeof(zip_abs), mod_abs, side.package) != 0
+            || stat(zip_abs, &st) != 0 || !S_ISREG(st.st_mode)
+            || !is_zip_name(side.package)) {
+            VLOG_WARN("discover: mod package \"%s\" missing in %s", side.package,
+                      mod_folder);
+            mod_side_clear(&side);
+            return 0;
+        }
+        snprintf(zip_name, sizeof(zip_name), "%s", side.package);
+        in_place = 1;
+    } else if (find_top_zip(mod_abs, zip_name, sizeof(zip_name), &size) == 0) {
+        if (join2(zip_abs, sizeof(zip_abs), mod_abs, zip_name) != 0) {
+            mod_side_clear(&side);
+            return 0;
+        }
+        in_place = 1;
+    }
+
+    if (vapord_mod_content_path(&app->cfg, game_id, id, version, NULL,
+                                version_dir, sizeof(version_dir))
+        != 0
+        || vapord_content_mkdirs(version_dir) != 0) {
+        VLOG_WARN("discover: cannot create content path for mod %s", id);
+        mod_side_clear(&side);
+        return 0;
+    }
+    mod_cover_file(mod_abs, &side, cover_name, sizeof(cover_name));
+
+    if (in_place) {
+        if (snprintf(source_rel, sizeof(source_rel), "%s/mods/%s/%s", game_folder,
+                     mod_folder, zip_name)
+            >= (int)sizeof(source_rel)) {
+            mod_side_clear(&side);
+            return 0;
+        }
+        snprintf(pkg_file, sizeof(pkg_file), "%s", basename_of(zip_name));
+        snprintf(pkg_path, sizeof(pkg_path), "%s", zip_abs);
+    } else {
+        if (join2(pkg_path, sizeof(pkg_path), version_dir, PACKAGED_ZIP) != 0
+            || join2(stage, sizeof(stage), version_dir, ".loose") != 0) {
+            mod_side_clear(&side);
+            return 0;
+        }
+        rm_tree(stage);
+        if (vapord_content_mkdirs(stage) != 0
+            || copy_mod_payload(mod_abs, "", stage, cover_name) != 0
+            || zip_directory(stage, pkg_path) != 0) {
+            rm_tree(stage);
+            VLOG_WARN("discover: mod \"%s\" has no files to package", mod_folder);
+            mod_side_clear(&side);
+            return 0;
+        }
+        rm_tree(stage);
+        snprintf(pkg_file, sizeof(pkg_file), "%s", PACKAGED_ZIP);
+        source_rel[0] = '\0';
+    }
+
+    if (file_size(pkg_path, &size) != 0
+        || vapor_sha256_file(pkg_path, sha) != 0) {
+        VLOG_WARN("discover: cannot hash mod \"%s\"", mod_folder);
+        mod_side_clear(&side);
+        return 0;
+    }
+    if (cover_name[0]) {
+        char src[VAPORD_PATH_MAX], dst[VAPORD_PATH_MAX];
+        const char *ext = strrchr(cover_name, '.');
+        char stored[64];
+
+        if (!ext) {
+            cover_name[0] = '\0';
+        } else {
+            snprintf(stored, sizeof(stored), "cover%s", ext);
+            if (join2(src, sizeof(src), mod_abs, cover_name) == 0
+                && join2(dst, sizeof(dst), version_dir, stored) == 0
+                && copy_file(src, dst) == 0) {
+                snprintf(cover_name, sizeof(cover_name), "%s", stored);
+            } else {
+                cover_name[0] = '\0';
+            }
+        }
+    }
+
+    mm.schema = VAPOR_MOD_SCHEMA;
+    mm.id = vapor_strdup(id);
+    mm.game_id = vapor_strdup(game_id);
+    mm.name = vapor_strdup(name);
+    mm.version = vapor_strdup(version);
+    mm.description = side.description[0] ? vapor_strdup(side.description) : NULL;
+    mm.cover = cover_name[0] ? vapor_strdup(cover_name) : NULL;
+    mm.package.file = vapor_strdup(pkg_file);
+    mm.package.format = vapor_strdup("zip");
+    mm.package.size = size;
+    memcpy(mm.package.sha256, sha, sizeof(mm.package.sha256));
+    mm.exec = side.exec_path[0] ? vapor_strdup(side.exec_path) : NULL;
+    mm.cwd = side.cwd[0] ? vapor_strdup(side.cwd) : NULL;
+    mm.args = side.args;
+    mm.nargs = side.nargs;
+    mm.exec_bits = side.exec_bits;
+    mm.nexec_bits = side.nexec_bits;
+    side.args = NULL;
+    side.nargs = 0;
+    side.exec_bits = NULL;
+    side.nexec_bits = 0;
+    json = vapor_mod_manifest_serialize(&mm);
+    {
+        vapor_mod_manifest check;
+
+        vapor_mod_manifest_init(&check);
+        if (!json
+            || vapor_mod_manifest_parse(json, strlen(json), &check, err,
+                                        sizeof(err))
+                   != 0) {
+            VLOG_WARN("discover: mod manifest for \"%s\" was rejected: %s", id,
+                      json ? err : "out of memory");
+            vapor_mod_manifest_free(&check);
+            free(json);
+            vapor_mod_manifest_free(&mm);
+            mod_side_clear(&side);
+            return 0;
+        }
+        vapor_mod_manifest_free(&check);
+    }
+    if (vapord_mod_upsert(app->db, &mm, json, source_rel[0] ? source_rel : NULL)
+        != 0) {
+        VLOG_WARN("discover: cannot store mod \"%s\"", id);
+        rc = 0;
+    } else {
+        vapord_discovered_mod row;
+
+        memset(&row, 0, sizeof(row));
+        snprintf(row.folder, sizeof(row.folder), "%s", mod_folder);
+        snprintf(row.mod_id, sizeof(row.mod_id), "%s", id);
+        snprintf(row.fingerprint, sizeof(row.fingerprint), "%s", fingerprint);
+        snprintf(row.version, sizeof(row.version), "%s", version);
+        vapord_discovered_mod_put(app->db, game_id, &row);
+        VLOG_INFO("discover: mod %s \"%s\" %s for %s", id, name, version,
+                  game_id);
+    }
+    free(json);
+    vapor_mod_manifest_free(&mm);
+    mod_side_clear(&side);
+    return rc;
+}
+
+static int
+discover_game_mods(vapord *app, const char *game_folder, const char *game_abs,
+                   const char *game_id)
+{
+    char                   mods_abs[VAPORD_PATH_MAX];
+    DIR                   *d;
+    struct dirent         *ent;
+    struct stat            st;
+    strlist                seen = { 0 };
+    strlist                used = { 0 };
+    vapord_discovered_mod *rows = NULL;
+    size_t                 n = 0, i;
+
+    if (join2(mods_abs, sizeof(mods_abs), game_abs, "mods") != 0) {
+        return -1;
+    }
+    if (stat(mods_abs, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        d = NULL;
+    } else {
+        d = opendir(mods_abs);
+    }
+    if (d) {
+        while ((ent = readdir(d)) != NULL) {
+            char        child[VAPORD_PATH_MAX];
+            struct stat cst;
+
+            if (ent->d_name[0] == '.' || strlen(ent->d_name) >= 256) {
+                continue;
+            }
+            if (join2(child, sizeof(child), mods_abs, ent->d_name) != 0
+                || stat(child, &cst) != 0 || !S_ISDIR(cst.st_mode)) {
+                continue;
+            }
+            if (strlist_push(&seen, ent->d_name) != 0) {
+                closedir(d);
+                strlist_free(&seen);
+                strlist_free(&used);
+                return -1;
+            }
+            if (publish_mod_folder(app, game_folder, game_id, ent->d_name, child,
+                                   &used)
+                != 0) {
+                closedir(d);
+                strlist_free(&seen);
+                strlist_free(&used);
+                return -1;
+            }
+        }
+        closedir(d);
+    }
+
+    if (vapord_discovered_mod_list(app->db, game_id, &rows, &n) == 0) {
+        for (i = 0; i < n; i++) {
+            if (strlist_contains(&seen, rows[i].folder)) {
+                continue;
+            }
+            VLOG_INFO("discover: mod folder \"%s\" is gone; dropping %s",
+                      rows[i].folder, rows[i].mod_id);
+            vapord_mod_delete(app->db, game_id, rows[i].mod_id);
+            vapord_discovered_mod_delete(app->db, game_id, rows[i].folder);
+        }
+        free(rows);
+    }
+    strlist_free(&seen);
+    strlist_free(&used);
+    return 0;
+}
+
 static int
 process_folder(vapord *app, const char *folder, int *meta_left)
 {
     char            abs[VAPORD_PATH_MAX];
     sidecar         meta;
     char            slug[VAPOR_ID_MAX + 1];
-    char            id[VAPOR_ID_MAX + 1];
+    char            id[VAPOR_ID_MAX + 1] = "";
     char            name[256];
     char            version[VAPOR_VERSION_MAX + 1];
     char            zip_rel[VAPORD_PATH_MAX] = "";
@@ -2547,6 +3209,16 @@ process_folder(vapord *app, const char *folder, int *meta_left)
                       cover_src, fingerprint, wrap_iso || zip_has_iso,
                       wrap_iso ? &isos : NULL);
 out:
+    if (id[0] && vapor_id_is_valid(id)) {
+        vapord_discovered_row owned;
+        int                   exists = 0;
+
+        if (vapord_discovered_get(app->db, folder, &owned) == 0
+            && strcmp(owned.game_id, id) == 0
+            && vapord_game_lookup(app->db, id, &exists) == 0) {
+            (void)discover_game_mods(app, folder, abs, id);
+        }
+    }
     sidecar_clear_saves(&meta);
     strlist_free(&isos);
     return rc;

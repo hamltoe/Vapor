@@ -54,6 +54,42 @@ vapord_content_path(const vapord_config *cfg, const char *game_id,
 }
 
 int
+vapord_mod_content_path(const vapord_config *cfg, const char *game_id,
+                        const char *mod_id, const char *version,
+                        const char *file, char *out, size_t outsz)
+{
+    int n;
+
+    if (!vapor_id_is_valid(game_id) || !vapor_id_is_valid(mod_id)) {
+        return -1;
+    }
+    if (version && !vapor_version_is_valid(version)) {
+        return -1;
+    }
+    if (file) {
+        if (!*file || strchr(file, '/') || strchr(file, '\\')
+            || strcmp(file, ".") == 0 || strstr(file, "..")) {
+            return -1;
+        }
+    }
+
+    if (version && file) {
+        n = snprintf(out, outsz, "%s/%s/mods/%s/%s/%s", cfg->content_root,
+                     game_id, mod_id, version, file);
+    } else if (version) {
+        n = snprintf(out, outsz, "%s/%s/mods/%s/%s", cfg->content_root, game_id,
+                     mod_id, version);
+    } else {
+        n = snprintf(out, outsz, "%s/%s/mods/%s", cfg->content_root, game_id,
+                     mod_id);
+    }
+    if (n < 0 || (size_t)n >= outsz) {
+        return -1;
+    }
+    return 0;
+}
+
+int
 vapord_content_mkdirs(const char *path)
 {
     char   tmp[VAPORD_PATH_MAX];

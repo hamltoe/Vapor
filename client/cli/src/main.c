@@ -41,6 +41,12 @@ usage(void)
     printf("    launch GAME             run an installed game or a local shortcut\n");
     printf("    verify GAME             check an install against its manifest\n");
     printf("    uninstall GAME          delete an installed game\n");
+    printf("    mods GAME               list mods published for a game\n");
+    printf("    mod install GAME MOD    download a mod and enable it\n");
+    printf("    mod remove GAME MOD     disable a mod and delete its download\n");
+    printf("    mod enable GAME MOD     turn a downloaded mod on\n");
+    printf("    mod disable GAME MOD    turn a mod off and restore its files\n");
+    printf("    restore GAME            put the install back to its original files\n");
     printf("    add PATH                add a program already on this computer\n");
     printf("      --name NAME             library title (default: the file name)\n");
     printf("                            uninstall only forgets this shortcut\n\n");
@@ -785,6 +791,87 @@ cmd_config(vapor_client *vc, int argc, char **argv)
     return 1;
 }
 
+static int
+cmd_mods(vapor_client *vc, const char *game_id)
+{
+    vapor_mod_entry *rows = NULL;
+    size_t           n = 0, i;
+
+    if (vapor_mods_fetch(vc, game_id, &rows, &n) != 0) {
+        fprintf(stderr, "vapor: %s\n", vc->err);
+        return 1;
+    }
+    if (n == 0) {
+        printf("no mods for %s\n", game_id);
+        free(rows);
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        const char *state = "available";
+
+        if (rows[i].enabled) {
+            state = "enabled";
+        } else if (rows[i].downloaded) {
+            state = "downloaded";
+        }
+        printf("%s  %s  %s  %s\n", rows[i].id,
+               rows[i].latest_version[0] ? rows[i].latest_version : "-",
+               state, rows[i].name[0] ? rows[i].name : rows[i].id);
+        if (rows[i].description[0]) {
+            printf("    %s\n", rows[i].description);
+        }
+    }
+    free(rows);
+    return 0;
+}
+
+static int
+cmd_mod(vapor_client *vc, int argc, char **argv)
+{
+    const char *action;
+    int         rc;
+
+    if (argc < 1) {
+        fprintf(stderr,
+                "vapor: usage: vapor mod install|remove|enable|disable GAME MOD\n");
+        return 1;
+    }
+    action = argv[0];
+    if (argc < 3) {
+        fprintf(stderr, "vapor: mod %s needs a game id and a mod id\n", action);
+        return 1;
+    }
+    if (strcmp(action, "install") == 0) {
+        rc = vapor_mod_install(vc, argv[1], argv[2]);
+    } else if (strcmp(action, "remove") == 0) {
+        rc = vapor_mod_remove(vc, argv[1], argv[2]);
+    } else if (strcmp(action, "enable") == 0) {
+        rc = vapor_mod_set_enabled(vc, argv[1], argv[2], 1);
+    } else if (strcmp(action, "disable") == 0) {
+        rc = vapor_mod_set_enabled(vc, argv[1], argv[2], 0);
+    } else {
+        fprintf(stderr, "vapor: unknown mod action \"%s\"\n", action);
+        return 1;
+    }
+    if (rc != 0) {
+        fprintf(stderr, "vapor: %s\n", vc->err[0] ? vc->err : "mod command failed");
+        return 1;
+    }
+    printf("%s %s for %s\n", action, argv[2], argv[1]);
+    return 0;
+}
+
+static int
+cmd_restore(vapor_client *vc, const char *game_id)
+{
+    if (vapor_mod_restore(vc, game_id) != 0) {
+        fprintf(stderr, "vapor: %s\n", vc->err[0] ? vc->err : "restore failed");
+        return 1;
+    }
+    printf("restored %s\n", game_id);
+    return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -861,6 +948,22 @@ main(int argc, char **argv)
             rc = 1;
         } else {
             rc = cmd_launch(&vc, argv[2]);
+        }
+    } else if (strcmp(cmd, "mods") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "vapor: mods needs a game id\n");
+            rc = 1;
+        } else {
+            rc = cmd_mods(&vc, argv[2]);
+        }
+    } else if (strcmp(cmd, "mod") == 0) {
+        rc = cmd_mod(&vc, argc - 2, argv + 2);
+    } else if (strcmp(cmd, "restore") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "vapor: restore needs a game id\n");
+            rc = 1;
+        } else {
+            rc = cmd_restore(&vc, argv[2]);
         }
     } else if (strcmp(cmd, "config") == 0) {
         rc = cmd_config(&vc, argc - 2, argv + 2);

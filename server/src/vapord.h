@@ -133,6 +133,42 @@ int vapord_save_get(sqlite3 *db, int64_t user_id, const char *game_id,
 int vapord_save_store(sqlite3 *db, int64_t user_id, const char *game_id,
                       int64_t revision, const char *sha, int64_t size);
 
+int vapord_mod_upsert(sqlite3 *db, const vapor_mod_manifest *m,
+                       const char *manifest_json, const char *source_path);
+int vapord_mod_delete(sqlite3 *db, const char *game_id, const char *mod_id);
+/* Newest version of one mod. 0 on success, 1 if the game has no such mod,
+ * -1 on error. */
+int vapord_mod_latest_version(sqlite3 *db, const char *game_id,
+                              const char *mod_id, char *out, size_t outsz);
+int vapord_mod_manifest(sqlite3 *db, const char *game_id, const char *mod_id,
+                        const char *version, char **out_json);
+/* 0 and a library-relative source path when the zip stays in the drop folder.
+ * 1 when the package lives under content_root. -1 when the row is missing. */
+int vapord_mod_source(sqlite3 *db, const char *game_id, const char *mod_id,
+                      const char *version, char *out, size_t outsz);
+int vapord_mod_cover(sqlite3 *db, const char *game_id, const char *mod_id,
+                     const char *version, char *out, size_t outsz);
+/* { "mods": [ ... ] } of the latest version of each mod. NULL on error.
+ * An empty list is a JSON object, not NULL. */
+cJSON *vapord_mods_json(sqlite3 *db, const char *game_id);
+
+typedef struct {
+    char folder[256];
+    char mod_id[VAPOR_ID_MAX + 1];
+    char fingerprint[VAPOR_SHA256_HEX_LEN + 1];
+    char version[VAPOR_VERSION_MAX + 1];
+} vapord_discovered_mod;
+
+int vapord_discovered_mod_get(sqlite3 *db, const char *game_id,
+                              const char *folder, vapord_discovered_mod *out);
+int vapord_discovered_mod_put(sqlite3 *db, const char *game_id,
+                              const vapord_discovered_mod *row);
+int vapord_discovered_mod_delete(sqlite3 *db, const char *game_id,
+                                 const char *folder);
+/* Caller frees *out. */
+int vapord_discovered_mod_list(sqlite3 *db, const char *game_id,
+                               vapord_discovered_mod **out, size_t *count);
+
 int vapord_rating_set(sqlite3 *db, int64_t user_id, const char *game_id,
                      int score);
 int vapord_rating_summary(sqlite3 *db, const char *game_id, int64_t user_id,
@@ -201,6 +237,10 @@ int vapord_route_saves(vapord *app, struct mg_connection *c,
 int vapord_content_path(const vapord_config *cfg, const char *game_id,
                         const char *version, const char *file,
                         char *out, size_t outsz);
+/* <content_root>/<game>/mods/<mod>/<version>[/<file>]. */
+int vapord_mod_content_path(const vapord_config *cfg, const char *game_id,
+                            const char *mod_id, const char *version,
+                            const char *file, char *out, size_t outsz);
 int vapord_content_mkdirs(const char *path);
 
 /* Join library_root + a relative path (may contain subdirectories). Rejects
